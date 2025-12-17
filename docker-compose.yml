@@ -7,6 +7,10 @@ services:
       - network_public
     environment:
       - PYTHONUNBUFFERED=1
+      # ========================================
+      # TROQUE ESSA CHAVE POR UMA SUA!
+      # ========================================
+      - SCRAPER_API_KEY=egn-2025-SuaChaveSecretaAqui
     deploy:
       mode: replicated
       replicas: 1

@@ -1,31 +1,36 @@
 version: '3.8'
 
 services:
-  scraper-api:
-    build: .
-    image: scraper-ofertas:latest
-    container_name: scraper-ofertas
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
+  scraper:
+    image: ghcr.io/eduardogubertpersonal/scraperofertas:latest
+    # Ou se preferir build local:
+    # build: .
+    networks:
+      - traefik_default
     environment:
       - PYTHONUNBUFFERED=1
-    # Para Traefik (seu setup)
-    networks:
-      - traefik-public
     deploy:
+      mode: replicated
+      replicas: 1
       labels:
         - "traefik.enable=true"
-        - "traefik.http.routers.scraper.rule=Host(`scraper.seudominio.com`)"
+        # Router HTTPS
+        - "traefik.http.routers.scraper.rule=Host(`scraperofertas.soluztions.shop`)"
         - "traefik.http.routers.scraper.entrypoints=websecure"
+        - "traefik.http.routers.scraper.tls=true"
         - "traefik.http.routers.scraper.tls.certresolver=letsencrypt"
+        # Service
         - "traefik.http.services.scraper.loadbalancer.server.port=8000"
       resources:
         limits:
-          memory: 2G  # Playwright precisa de memória
+          memory: 2G
         reservations:
           memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
 
 networks:
-  traefik-public:
+  traefik_default:
     external: true

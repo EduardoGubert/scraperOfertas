@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  scraper-api:
+    build: .
+    image: scraper-ofertas:latest
+    container_name: scraper-ofertas
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Para Traefik (seu setup)
+    networks:
+      - traefik-public
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.scraper.rule=Host(`scraper.seudominio.com`)"
+        - "traefik.http.routers.scraper.entrypoints=websecure"
+        - "traefik.http.routers.scraper.tls.certresolver=letsencrypt"
+        - "traefik.http.services.scraper.loadbalancer.server.port=8000"
+      resources:
+        limits:
+          memory: 2G  # Playwright precisa de memória
+        reservations:
+          memory: 512M
+
+networks:
+  traefik-public:
+    external: true

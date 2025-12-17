@@ -1,0 +1,8 @@
+# Scraper de Ofertas - Dependências
+# Instalar com: pip install -r requirements.txt
+
+playwright>=1.40.0
+asyncio-throttle>=1.0.2  # Opcional: rate limiting
+
+# Após instalar, executar:
+# playwright install chromium

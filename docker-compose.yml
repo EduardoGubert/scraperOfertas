@@ -8,9 +8,20 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       # ========================================
-      # TROQUE ESSA CHAVE POR UMA SUA!
+      # API KEY - TROQUE POR UMA CHAVE SUA!
       # ========================================
       - SCRAPER_API_KEY=egn-2025-SuaChaveSecretaAqui
+      
+      # ========================================
+      # CONFIGURAÇÃO DE AFILIADOS
+      # ========================================
+      # Mercado Livre
+      - ML_MATT_TOOL=39349855
+      - ML_MATT_WORD=egnofertas
+      
+      # Magazine Você
+      - MAGALU_SHOWCASE=magazinegubert
+      
     deploy:
       mode: replicated
       replicas: 1

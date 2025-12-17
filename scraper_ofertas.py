@@ -1,5 +1,5 @@
 """
-Scraper de Ofertas - Magazine Você, Magalu, Mercado Livre, Shopee
+Scraper de Ofertas e Cupons - Magazine Você, Magalu, Mercado Livre, Shopee
 Autor: Eduardo (egnOfertas)
 Usa Playwright para JavaScript Rendering
 """
@@ -9,16 +9,30 @@ import json
 import re
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 from playwright.async_api import async_playwright, Page, Browser
 
 
 class ScraperOfertas:
     """Scraper genérico para e-commerces brasileiros"""
     
-    def __init__(self, wait_ms: int = 1000, headless: bool = True):
+    def __init__(self, wait_ms: int = 1000, headless: bool = True, affiliate_config: dict = None):
         self.wait_ms = wait_ms
         self.headless = headless
         self.browser: Optional[Browser] = None
+        
+        # Configuração de afiliados
+        self.affiliate_config = affiliate_config or {}
+        # Exemplo de config:
+        # {
+        #     "mercadolivre": {
+        #         "base_url": "https://www.mercadolivre.com.br/social/eduardogubertnascimento",
+        #         "params": {"matt_tool": "39349855", "matt_word": "egnofertas"}
+        #     },
+        #     "magazinevoce": {
+        #         "showcase": "magazinegubert"
+        #     }
+        # }
         
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
@@ -56,6 +70,259 @@ class ScraperOfertas:
         
         return page
 
+    def _add_affiliate_link(self, url: str, source: str) -> str:
+        """Adiciona parâmetros de afiliado à URL"""
+        if not self.affiliate_config or source not in self.affiliate_config:
+            return url
+        
+        config = self.affiliate_config[source]
+        
+        if source == "mercadolivre" and "base_url" in config:
+            # Para ML, usa o formato de link de afiliado
+            # Mantém a URL original mas pode adicionar tracking
+            params = config.get("params", {})
+            if params:
+                separator = "&" if "?" in url else "?"
+                param_string = urlencode(params)
+                return f"{url}{separator}{param_string}"
+        
+        return url
+
+    # ============================================
+    # CUPONS
+    # ============================================
+    
+    async def scrape_cupons_magazine(self, showcase: str = "magazinegubert") -> list[dict]:
+        """
+        Scraper de cupons do Magazine Você
+        
+        Args:
+            showcase: ID da sua loja (ex: magazinegubert)
+            
+        Returns:
+            Lista de cupons com código, desconto, categoria e imagem
+        """
+        url = f"https://especiais.magazineluiza.com.br/magazinevoce/cupons/?showcase={showcase}"
+        page = await self._create_page()
+        cupons = []
+        
+        try:
+            print(f"🔄 Buscando cupons: {url}")
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            await page.wait_for_timeout(self.wait_ms)
+            
+            # Extrai cupons via JavaScript
+            cupons = await page.evaluate("""
+                () => {
+                    const cupons = [];
+                    const images = document.querySelectorAll('img[src*="pmd_"]');
+                    
+                    images.forEach(img => {
+                        const src = img.src || '';
+                        const filename = src.split('/').pop().split('.')[0];
+                        
+                        // Extrai informações do nome do arquivo
+                        // Formato: pmd_categoria_desconto_data
+                        // Ex: pmd_cozinha50_021225 = 50% off em cozinha
+                        const parts = filename.replace('pmd_', '').split('_');
+                        
+                        if (parts.length >= 1) {
+                            // Extrai categoria e desconto
+                            const catDesc = parts[0];
+                            const match = catDesc.match(/([a-z]+)(\d+)/i);
+                            
+                            if (match) {
+                                const categoria = match[1];
+                                const desconto = match[2];
+                                
+                                // Tenta extrair código do cupom (geralmente está na imagem)
+                                // O código real precisa ser clicado, então salvamos a referência
+                                cupons.push({
+                                    categoria: categoria.toUpperCase(),
+                                    desconto: desconto + '%',
+                                    codigo: catDesc.toUpperCase(),
+                                    imagem: src,
+                                    tipo: 'magazine'
+                                });
+                            } else if (catDesc.toLowerCase() === 'bemvindo') {
+                                cupons.push({
+                                    categoria: 'BOAS VINDAS',
+                                    desconto: 'Especial',
+                                    codigo: 'BEMVINDO',
+                                    imagem: src,
+                                    tipo: 'magazine'
+                                });
+                            }
+                        }
+                    });
+                    
+                    return cupons;
+                }
+            """)
+            
+            print(f"✅ Encontrados {len(cupons)} cupons")
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar cupons Magazine: {e}")
+        finally:
+            await page.close()
+            
+        return cupons
+
+    async def scrape_cupons_mercadolivre(self) -> list[dict]:
+        """
+        Scraper de cupons do Mercado Livre
+        
+        Returns:
+            Lista de cupons disponíveis
+        """
+        url = "https://www.mercadolivre.com.br/cupons"
+        page = await self._create_page()
+        cupons = []
+        
+        try:
+            print(f"🔄 Buscando cupons ML: {url}")
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            await page.wait_for_timeout(self.wait_ms * 2)
+            await self._scroll_page(page)
+            
+            # Extrai cupons via JavaScript
+            cupons = await page.evaluate("""
+                () => {
+                    const cupons = [];
+                    
+                    // Seletores possíveis para cupons do ML
+                    const cards = document.querySelectorAll('[class*="coupon"], [class*="Coupon"], [data-testid*="coupon"]');
+                    
+                    cards.forEach(card => {
+                        try {
+                            const title = card.querySelector('[class*="title"], h2, h3');
+                            const discount = card.querySelector('[class*="discount"], [class*="value"]');
+                            const code = card.querySelector('[class*="code"], button');
+                            const img = card.querySelector('img');
+                            
+                            cupons.push({
+                                categoria: title?.textContent?.trim() || 'Geral',
+                                desconto: discount?.textContent?.trim() || '',
+                                codigo: code?.textContent?.trim() || 'VER CUPOM',
+                                imagem: img?.src || '',
+                                tipo: 'mercadolivre'
+                            });
+                        } catch(e) {}
+                    });
+                    
+                    // Se não encontrou com seletores específicos, tenta genérico
+                    if (cupons.length === 0) {
+                        const allCards = document.querySelectorAll('[class*="card"], [class*="Card"]');
+                        allCards.forEach(card => {
+                            const text = card.textContent || '';
+                            if (text.includes('%') || text.includes('OFF') || text.includes('R$')) {
+                                const img = card.querySelector('img');
+                                cupons.push({
+                                    categoria: 'Oferta',
+                                    desconto: text.match(/(\d+%|\d+\s*OFF|R\$\s*\d+)/i)?.[0] || '',
+                                    codigo: 'VER OFERTA',
+                                    imagem: img?.src || '',
+                                    tipo: 'mercadolivre'
+                                });
+                            }
+                        });
+                    }
+                    
+                    return cupons;
+                }
+            """)
+            
+            print(f"✅ Encontrados {len(cupons)} cupons ML")
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar cupons ML: {e}")
+        finally:
+            await page.close()
+            
+        return cupons
+
+    async def scrape_ofertas_mercadolivre(self) -> list[dict]:
+        """
+        Scraper da página de ofertas do Mercado Livre
+        
+        Returns:
+            Lista de produtos em oferta
+        """
+        url = "https://www.mercadolivre.com.br/ofertas"
+        page = await self._create_page()
+        produtos = []
+        
+        try:
+            print(f"🔄 Buscando ofertas ML: {url}")
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            await page.wait_for_timeout(self.wait_ms)
+            await self._scroll_page(page, scroll_count=5)
+            
+            # Extrai ofertas via JavaScript
+            produtos = await page.evaluate("""
+                () => {
+                    const produtos = [];
+                    
+                    // Seletores da página de ofertas do ML
+                    const items = document.querySelectorAll('.promotion-item, .poly-card, [class*="promotion"], [class*="deal"]');
+                    
+                    items.forEach(item => {
+                        try {
+                            const img = item.querySelector('img');
+                            const title = item.querySelector('[class*="title"], .poly-card__title, h2, h3');
+                            const originalPrice = item.querySelector('[class*="original"], [class*="from"], s, del');
+                            const currentPrice = item.querySelector('[class*="current"], [class*="price"]:not([class*="original"]), .andes-money-amount');
+                            const discount = item.querySelector('[class*="discount"], [class*="off"]');
+                            const link = item.querySelector('a') || item.closest('a');
+                            
+                            // Extrai preço atual
+                            let preco = '';
+                            if (currentPrice) {
+                                const fraction = currentPrice.querySelector('.andes-money-amount__fraction');
+                                if (fraction) {
+                                    preco = 'R$ ' + fraction.textContent.trim();
+                                } else {
+                                    preco = currentPrice.textContent.trim();
+                                }
+                            }
+                            
+                            if (title || img) {
+                                produtos.push({
+                                    foto: img?.src || '',
+                                    nome: title?.textContent?.trim() || img?.alt || '',
+                                    preço: preco,
+                                    preço_original: originalPrice?.textContent?.trim() || '',
+                                    desconto: discount?.textContent?.trim() || '',
+                                    url: link?.href || ''
+                                });
+                            }
+                        } catch(e) {}
+                    });
+                    
+                    return produtos;
+                }
+            """)
+            
+            # Adiciona links de afiliado
+            produtos = [
+                {**p, 'url': self._add_affiliate_link(p['url'], 'mercadolivre')}
+                for p in produtos
+            ]
+            
+            print(f"✅ Encontradas {len(produtos)} ofertas ML")
+            
+        except Exception as e:
+            print(f"❌ Erro ao buscar ofertas ML: {e}")
+        finally:
+            await page.close()
+            
+        return produtos
+
+    # ============================================
+    # PRODUTOS (mantém os métodos originais)
+    # ============================================
+
     async def scrape_magazine_voce(self, url: str) -> list[dict]:
         """
         Scraper específico para Magazine Você / Magalu
@@ -79,12 +346,10 @@ class ScraperOfertas:
             
             # Seletores do Magazine Você/Magalu
             selectors = [
-                # Estrutura principal
                 '[data-testid="product-card"]',
                 '.product-card',
                 'li[class*="product"]',
                 'a[class*="product"]',
-                # Fallback genérico
                 '[class*="ProductCard"]',
                 '[class*="productCard"]'
             ]
@@ -98,7 +363,6 @@ class ScraperOfertas:
                     break
             
             if not product_elements:
-                # Tenta extrair via JavaScript
                 produtos = await self._extract_via_js_magazine(page)
             else:
                 for element in product_elements:
@@ -122,8 +386,6 @@ class ScraperOfertas:
         return await page.evaluate("""
             () => {
                 const produtos = [];
-                
-                // Tenta múltiplas estratégias
                 const cards = document.querySelectorAll('a[href*="/p/"]');
                 
                 cards.forEach(card => {
@@ -156,12 +418,10 @@ class ScraperOfertas:
             'url': ''
         }
         
-        # Foto
         img = await element.query_selector('img')
         if img:
             produto['foto'] = await img.get_attribute('src') or await img.get_attribute('data-src') or ''
         
-        # Nome
         for selector in ['h2', 'h3', '[class*="title"]', '[class*="name"]']:
             title_el = await element.query_selector(selector)
             if title_el:
@@ -169,11 +429,9 @@ class ScraperOfertas:
                 if produto['nome']:
                     break
         
-        # Se não achou título, tenta alt da imagem
         if not produto['nome'] and img:
             produto['nome'] = await img.get_attribute('alt') or ''
         
-        # Preço
         for selector in ['[class*="price"]', '[class*="Price"]', '[data-testid*="price"]']:
             price_el = await element.query_selector(selector)
             if price_el:
@@ -181,7 +439,6 @@ class ScraperOfertas:
                 if produto['preço']:
                     break
         
-        # URL
         link = await element.query_selector('a') if await element.get_attribute('href') is None else element
         if link:
             href = await link.get_attribute('href')
@@ -209,11 +466,9 @@ class ScraperOfertas:
             await page.wait_for_timeout(self.wait_ms)
             await self._scroll_page(page)
             
-            # Seletores do ML
             items = await page.query_selector_all('.ui-search-layout__item, .andes-card')
             
             if not items:
-                # Extração via JS
                 produtos = await page.evaluate("""
                     () => {
                         const items = document.querySelectorAll('.ui-search-layout__item, .andes-card');
@@ -237,6 +492,12 @@ class ScraperOfertas:
                     produto = await self._parse_product_ml(item)
                     if produto.get('nome'):
                         produtos.append(produto)
+            
+            # Adiciona links de afiliado
+            produtos = [
+                {**p, 'url': self._add_affiliate_link(p['url'], 'mercadolivre')}
+                for p in produtos
+            ]
                         
         except Exception as e:
             print(f"❌ Erro no ML: {e}")
@@ -268,25 +529,16 @@ class ScraperOfertas:
         return produto
 
     async def scrape_shopee(self, url: str) -> list[dict]:
-        """
-        Scraper específico para Shopee
-        
-        Args:
-            url: URL da página
-            
-        Returns:
-            Lista de produtos
-        """
+        """Scraper específico para Shopee"""
         page = await self._create_page()
         produtos = []
         
         try:
             print(f"🔄 Acessando Shopee: {url}")
             await page.goto(url, wait_until='networkidle', timeout=45000)
-            await page.wait_for_timeout(self.wait_ms * 2)  # Shopee é mais lento
+            await page.wait_for_timeout(self.wait_ms * 2)
             await self._scroll_page(page, scroll_count=5)
             
-            # Extração via JS (Shopee usa React pesado)
             produtos = await page.evaluate("""
                 () => {
                     const items = document.querySelectorAll('[data-sqe="item"], .shopee-search-item-result__item, .shop-search-result-view__item');
@@ -296,7 +548,6 @@ class ScraperOfertas:
                         const price = item.querySelector('.ZEgDH9, .k9JZlv, [class*="price"]');
                         const link = item.querySelector('a');
                         
-                        // Limpa preço (remove "R$" duplicados, etc)
                         let preco = price?.textContent?.trim() || '';
                         if (!preco.includes('R$')) preco = 'R$ ' + preco;
                         
@@ -318,9 +569,7 @@ class ScraperOfertas:
         return produtos
 
     async def scrape_amazon(self, url: str) -> list[dict]:
-        """
-        Scraper específico para Amazon Brasil
-        """
+        """Scraper específico para Amazon Brasil"""
         page = await self._create_page()
         produtos = []
         
@@ -368,19 +617,12 @@ class ScraperOfertas:
         for i in range(scroll_count):
             await page.evaluate('window.scrollBy(0, window.innerHeight)')
             await page.wait_for_timeout(500)
-        # Volta pro topo
         await page.evaluate('window.scrollTo(0, 0)')
         await page.wait_for_timeout(300)
 
     async def scrape_auto(self, url: str) -> list[dict]:
         """
         Detecta automaticamente o site e usa o scraper correto
-        
-        Args:
-            url: Qualquer URL de e-commerce
-            
-        Returns:
-            Lista de produtos
         """
         url_lower = url.lower()
         
@@ -394,44 +636,38 @@ class ScraperOfertas:
             return await self.scrape_amazon(url)
         else:
             print(f"⚠️ Site não reconhecido, tentando scraper genérico...")
-            return await self.scrape_magazine_voce(url)  # Tenta genérico
+            return await self.scrape_magazine_voce(url)
 
 
 async def main():
-    """Exemplo de uso"""
+    """Exemplo de uso com cupons"""
     
-    # URLs para testar
-    urls = [
-        "https://www.magazinevoce.com.br/magazinegubert/selecao/ofertasdodia/?sortOrientation=desc&sortType=soldQuantity&filters=review---4",
-        # "https://lista.mercadolivre.com.br/ofertas",
-        # "https://shopee.com.br/flash_sale",
-    ]
+    # Configuração de afiliado
+    affiliate_config = {
+        "mercadolivre": {
+            "params": {"matt_tool": "39349855", "matt_word": "egnofertas"}
+        },
+        "magazinevoce": {
+            "showcase": "magazinegubert"
+        }
+    }
     
-    async with ScraperOfertas(wait_ms=1500, headless=True) as scraper:
-        for url in urls:
-            print(f"\n{'='*60}")
-            print(f"📦 Scraping: {url[:60]}...")
-            print('='*60)
-            
-            produtos = await scraper.scrape_auto(url)
-            
-            print(f"\n✅ Total de produtos encontrados: {len(produtos)}")
-            
-            # Salva em JSON
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"produtos_{timestamp}.json"
-            
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(produtos, f, ensure_ascii=False, indent=4)
-            
-            print(f"💾 Salvo em: {filename}")
-            
-            # Preview dos primeiros 3
-            print("\n📋 Preview dos primeiros produtos:")
-            for i, p in enumerate(produtos[:3], 1):
-                print(f"\n{i}. {p['nome'][:50]}...")
-                print(f"   💰 {p['preço']}")
-                print(f"   🔗 {p['url'][:60]}...")
+    async with ScraperOfertas(wait_ms=1500, headless=True, affiliate_config=affiliate_config) as scraper:
+        # Buscar cupons Magazine
+        print("\n" + "="*60)
+        print("🎟️  CUPONS MAGAZINE VOCÊ")
+        print("="*60)
+        cupons = await scraper.scrape_cupons_magazine("magazinegubert")
+        for c in cupons[:5]:
+            print(f"  • {c['categoria']}: {c['desconto']} - Código: {c['codigo']}")
+        
+        # Buscar ofertas ML
+        print("\n" + "="*60)
+        print("🛒 OFERTAS MERCADO LIVRE")
+        print("="*60)
+        ofertas = await scraper.scrape_ofertas_mercadolivre()
+        for o in ofertas[:5]:
+            print(f"  • {o['nome'][:40]}... - {o['preço']}")
 
 
 if __name__ == "__main__":

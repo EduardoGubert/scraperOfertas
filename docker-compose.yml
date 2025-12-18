@@ -1,46 +1,51 @@
 version: '3.8'
 
 services:
-  scraper:
-    image: eduardogubert/scraperofertas:latest
+  scraper-ml-afiliado:
+    image: ghcr.io/eduardogubertpersonal/scraper-ml-afiliado:latest
+    # Ou build local:
+    # build: .
+    
+    container_name: scraper-ml-afiliado
+    
     networks:
       - network_public
+    
     environment:
       - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
       # ========================================
       # API KEY - TROQUE POR UMA CHAVE SUA!
       # ========================================
-      - SCRAPER_API_KEY=egn-2025-SuaChaveSecretaAqui
-      
-      # ========================================
-      # CONFIGURAÇÃO DE AFILIADOS
-      # ========================================
-      # Mercado Livre
-      - ML_MATT_TOOL=39349855
-      - ML_MATT_WORD=egnofertas
-      
-      # Magazine Você
-      - MAGALU_SHOWCASE=magazinegubert
-      
+      - SCRAPER_API_KEY=${SCRAPER_API_KEY:-egn-2025-SuaChaveAqui}
+    
+    volumes:
+      # IMPORTANTE: Persiste os dados do browser (cookies, sessão)
+      - ml_browser_data:/app/ml_browser_data
+    
     deploy:
       mode: replicated
       replicas: 1
       labels:
         - "traefik.enable=true"
-        - "traefik.http.routers.scraper.rule=Host(`scraperofertas.soluztions.shop`)"
-        - "traefik.http.routers.scraper.entrypoints=websecure"
-        - "traefik.http.routers.scraper.tls=true"
-        - "traefik.http.routers.scraper.tls.certresolver=letsencrypt"
-        - "traefik.http.services.scraper.loadbalancer.server.port=8000"
+        - "traefik.http.routers.scraper-ml.rule=Host(`scraper-ml.soluztions.shop`)"
+        - "traefik.http.routers.scraper-ml.entrypoints=websecure"
+        - "traefik.http.routers.scraper-ml.tls=true"
+        - "traefik.http.routers.scraper-ml.tls.certresolver=letsencrypt"
+        - "traefik.http.services.scraper-ml.loadbalancer.server.port=8000"
       resources:
         limits:
-          memory: 2G
+          memory: 3G  # Playwright precisa de mais memória
         reservations:
-          memory: 512M
+          memory: 1G
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+
+volumes:
+  ml_browser_data:
+    driver: local
 
 networks:
   network_public:

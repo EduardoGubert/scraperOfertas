@@ -1,8 +1,16 @@
-# Scraper de Ofertas - Dependências
-# Instalar com: pip install -r requirements.txt
+# Scraper ML Afiliado - Dependências
+# pip install -r requirements.txt
 
+# Playwright para browser automation
 playwright>=1.40.0
-asyncio-throttle>=1.0.2  # Opcional: rate limiting
+
+# FastAPI para API REST
+fastapi>=0.109.0
+uvicorn[standard]>=0.25.0
+
+# Utilitários
+pydantic>=2.0.0
+python-dotenv>=1.0.0
 
 # Após instalar, executar:
 # playwright install chromium

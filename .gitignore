@@ -50,8 +50,12 @@ coverage.xml
 .pytest_cache/
 
 # Output files
-produtos_*.json
+ofertas_*.json
 *.json.bak
+
+# Browser data (cookies/sessão) - NÃO COMMITAR!
+ml_browser_data/
+ml_cookies.json
 
 # OS
 .DS_Store

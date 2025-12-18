@@ -83,49 +83,137 @@ class ScraperMLAfiliado:
         await self._close_browser()
     
     async def _init_browser(self):
-        """Inicializa o browser com contexto persistente"""
+        """Inicializa o browser com contexto persistente e anti-detecção avançada"""
         self.playwright = await async_playwright().start()
         
         # Usa contexto persistente para manter login
+        # IMPORTANTE: channel="chrome" usa o Chrome real instalado (melhor para CAPTCHA)
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=self.USER_DATA_DIR,
             headless=self.headless,
+            channel="chrome",  # Usa Chrome real ao invés do Chromium
             viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             locale='pt-BR',
             timezone_id='America/Sao_Paulo',
+            geolocation={'latitude': -23.5505, 'longitude': -46.6333},  # São Paulo
+            permissions=['geolocation'],
+            color_scheme='light',
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-web-security',
-            ]
+                '--disable-infobars',
+                '--disable-extensions',
+                '--disable-gpu',
+                '--window-size=1920,1080',
+                '--start-maximized',
+                # Flags importantes para reCAPTCHA
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--enable-features=NetworkService,NetworkServiceInProcess',
+            ],
+            ignore_default_args=['--enable-automation'],  # Remove flag de automação
         )
         
         self.page = await self.context.new_page()
         
-        # Anti-detecção
+        # Anti-detecção AVANÇADA
         await self.page.add_init_script("""
-            // Remove webdriver flag
+            // =============================================
+            // ANTI-DETECÇÃO PARA reCAPTCHA
+            // =============================================
+            
+            // 1. Remove webdriver
             Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
+                get: () => false,
             });
             
-            // Fake plugins
+            // 2. Fake plugins (Chrome real tem plugins)
             Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
+                get: () => {
+                    const plugins = [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+                    ];
+                    plugins.item = (i) => plugins[i];
+                    plugins.namedItem = (name) => plugins.find(p => p.name === name);
+                    plugins.refresh = () => {};
+                    return plugins;
+                },
             });
             
-            // Fake languages
+            // 3. Fake mimeTypes
+            Object.defineProperty(navigator, 'mimeTypes', {
+                get: () => {
+                    const mimes = [
+                        { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                    ];
+                    mimes.item = (i) => mimes[i];
+                    mimes.namedItem = (name) => mimes.find(m => m.type === name);
+                    return mimes;
+                },
+            });
+            
+            // 4. Languages
             Object.defineProperty(navigator, 'languages', {
-                get: () => ['pt-BR', 'pt', 'en-US', 'en']
+                get: () => ['pt-BR', 'pt', 'en-US', 'en'],
             });
             
-            // Remove automation flags
-            window.chrome = { runtime: {} };
+            // 5. Chrome object (importante!)
+            window.chrome = {
+                runtime: {
+                    PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+                    PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64' },
+                    PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64' },
+                    RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' },
+                    OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+                    OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+                },
+            };
+            
+            // 6. Permissions API
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            
+            // 7. WebGL Vendor e Renderer (importante para fingerprint)
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) return 'Intel Inc.';  // UNMASKED_VENDOR_WEBGL
+                if (parameter === 37446) return 'Intel Iris OpenGL Engine';  // UNMASKED_RENDERER_WEBGL
+                return getParameter.call(this, parameter);
+            };
+            
+            // 8. Remove Playwright/Selenium traces
+            delete window.__playwright;
+            delete window.__selenium_unwrapped;
+            delete window.__driver_evaluate;
+            delete window.__webdriver_evaluate;
+            delete window.__driver_unwrapped;
+            delete window.__webdriver_unwrapped;
+            delete window.__fxdriver_evaluate;
+            delete window.__fxdriver_unwrapped;
+            delete document.__selenium_unwrapped;
+            delete document.__webdriver_evaluate;
+            delete document.__driver_evaluate;
+            
+            // 9. Console.debug
+            console.debug = () => {};
+            
+            // 10. Notification (para parecer browser real)
+            if (!window.Notification) {
+                window.Notification = {
+                    permission: 'default',
+                    requestPermission: () => Promise.resolve('default'),
+                };
+            }
         """)
         
-        print("✅ Browser inicializado com contexto persistente")
+        print("✅ Browser inicializado com anti-detecção avançada")
     
     async def _close_browser(self):
         """Fecha o browser mantendo os dados"""

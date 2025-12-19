@@ -1,57 +1,66 @@
 """
-API REST para Scraper ML Afiliado
-Integração com n8n, Make, Zapier
+API REST - Scraper ML Afiliado
+Endpoints para scraping de ofertas do Mercado Livre com links de afiliado.
 
 Endpoints:
-- POST /login - Inicia sessão de login manual
-- GET /login/status - Verifica se está logado
-- POST /scrape/ofertas - Scraping completo com links de afiliado
-- GET /health - Health check
+- GET  /health           - Health check basico
+- GET  /auth/status      - Verifica se cookies estao validos (NAO inicia browser)
+- GET  /auth/check       - Testa login abrindo browser (mais lento, mais preciso)
+- POST /scrape/ofertas   - Executa scraping com links de afiliado
 """
 
-import asyncio
 import os
+import json
 from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Security
+from pathlib import Path
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from contextlib import asynccontextmanager
+from pydantic import BaseModel, ConfigDict
 
 from scraper_ml_afiliado import ScraperMLAfiliado
 
 
 # ============================================
-# CONFIGURAÇÃO
+# CONFIGURACAO
 # ============================================
 API_KEY = os.getenv("SCRAPER_API_KEY", "egn-2025-secret-key")
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-# Estado global do scraper
+# Detecta se esta rodando em Docker ou localmente
+if os.path.exists("/app"):
+    BROWSER_DATA_DIR = "/app/ml_browser_data"
+else:
+    BROWSER_DATA_DIR = os.path.join(os.path.dirname(__file__), "ml_browser_data")
+
+METADATA_FILE = os.path.join(BROWSER_DATA_DIR, "login_metadata.json")
+
+
+# Estado global
 scraper_instance: Optional[ScraperMLAfiliado] = None
-is_logged_in: bool = False
 
 
 async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
     """Verifica API Key"""
     if api_key is None:
-        raise HTTPException(status_code=401, detail="API Key não fornecida")
+        raise HTTPException(status_code=401, detail="API Key nao fornecida. Use header X-API-Key")
     if api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="API Key inválida")
+        raise HTTPException(status_code=403, detail="API Key invalida")
     return api_key
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle da aplicação"""
+    """Lifecycle da aplicacao"""
     global scraper_instance
-    print("🚀 Iniciando API do Scraper ML Afiliado...")
+    print("Iniciando API do Scraper ML Afiliado...")
     yield
-    # Cleanup
     if scraper_instance:
         await scraper_instance._close_browser()
-    print("👋 API encerrada")
+    print("API encerrada")
 
 
 # ============================================
@@ -59,8 +68,16 @@ async def lifespan(app: FastAPI):
 # ============================================
 app = FastAPI(
     title="Scraper ML Afiliado API",
-    description="API para scraping de ofertas do Mercado Livre com links de afiliado",
-    version="2.0.0",
+    description="""
+API para scraping de ofertas do Mercado Livre com links de afiliado.
+
+## Fluxo de uso:
+1. Faca login localmente: `python login_local.py`
+2. Sincronize cookies para VPS: `./sync_to_vps.ps1`
+3. Verifique status: `GET /auth/status`
+4. Execute scraping: `POST /scrape/ofertas`
+    """,
+    version="3.0.0",
     lifespan=lifespan
 )
 
@@ -69,34 +86,28 @@ app = FastAPI(
 # MODELS
 # ============================================
 class ScrapeRequest(BaseModel):
-    url: Optional[str] = None  # URL das ofertas (padrão: /ofertas)
-    max_produtos: Optional[int] = 50
+    url: Optional[str] = None
+    max_produtos: Optional[int] = 20
     headless: Optional[bool] = True
-    
-    class Config:
-        json_schema_extra = {
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
-                "url": "https://www.mercadolivre.com.br/ofertas",
-                "max_produtos": 50,
+                "max_produtos": 20,
                 "headless": True
             }
         }
+    )
 
 
-class Produto(BaseModel):
-    url_original: str
-    url_afiliado: Optional[str]
-    url_curta: Optional[str]
-    product_id: Optional[str]
-    mlb_id: Optional[str]
-    nome: Optional[str]
-    foto_url: Optional[str]
-    preco_original: Optional[float]
-    preco_atual: Optional[float]
-    preco_pix: Optional[float]
-    desconto: Optional[int]
-    status: str
-    erro: Optional[str]
+class AuthStatusResponse(BaseModel):
+    cookies_exist: bool
+    cookies_valid: bool
+    login_date: Optional[str] = None
+    days_since_login: Optional[int] = None
+    days_until_expiry: Optional[int] = None
+    message: str
+    action_required: Optional[str] = None
 
 
 class ScrapeResponse(BaseModel):
@@ -106,245 +117,321 @@ class ScrapeResponse(BaseModel):
     total_sem_link: int
     produtos: list[dict]
     scraped_at: str
-    source: str
-
-
-class LoginStatusResponse(BaseModel):
-    logged_in: bool
-    message: str
 
 
 # ============================================
-# ENDPOINTS PÚBLICOS
+# FUNCOES AUXILIARES
+# ============================================
+def check_cookies_files() -> dict:
+    """
+    Verifica se os arquivos de cookies existem.
+    NAO abre o browser, apenas checa arquivos.
+    """
+    result = {
+        "cookies_exist": False,
+        "metadata_exist": False,
+        "login_date": None,
+        "days_since_login": None,
+        "days_until_expiry": None,
+    }
+
+    # Verifica se diretorio existe
+    if not os.path.exists(BROWSER_DATA_DIR):
+        return result
+
+    # Verifica arquivos importantes do Chromium
+    required_files = ["Default/Cookies", "Default/Network/Cookies"]
+    for file in required_files:
+        full_path = os.path.join(BROWSER_DATA_DIR, file)
+        if os.path.exists(full_path):
+            result["cookies_exist"] = True
+            break
+
+    # Verifica metadata de login
+    if os.path.exists(METADATA_FILE):
+        result["metadata_exist"] = True
+        try:
+            with open(METADATA_FILE, 'r') as f:
+                metadata = json.load(f)
+
+            login_date = datetime.fromisoformat(metadata.get("login_date", ""))
+            expires_date = datetime.fromisoformat(metadata.get("expires_estimate", ""))
+
+            result["login_date"] = login_date.strftime("%Y-%m-%d %H:%M")
+            result["days_since_login"] = (datetime.now() - login_date).days
+            result["days_until_expiry"] = (expires_date - datetime.now()).days
+
+        except Exception:
+            pass
+
+    return result
+
+
+# ============================================
+# ENDPOINTS
 # ============================================
 @app.get("/")
 async def root():
+    """Pagina inicial com documentacao dos endpoints"""
     return {
-        "message": "Scraper ML Afiliado API",
-        "version": "2.0.0",
+        "api": "Scraper ML Afiliado",
+        "version": "3.0.0",
         "endpoints": {
-            "GET /health": "Health check",
-            "GET /login/status": "Verifica status do login",
-            "POST /login/init": "Inicia browser para login manual",
-            "POST /scrape/ofertas": "Scraping com links de afiliado",
-        }
+            "GET /health": "Health check basico",
+            "GET /auth/status": "Verifica cookies (rapido, sem browser)",
+            "GET /auth/check": "Testa login real (lento, abre browser)",
+            "POST /scrape/ofertas": "Executa scraping"
+        },
+        "docs": "/docs"
     }
 
 
 @app.get("/health")
 async def health():
-    global is_logged_in
+    """Health check basico"""
+    cookies_info = check_cookies_files()
     return {
         "status": "healthy",
-        "logged_in": is_logged_in,
+        "cookies_exist": cookies_info["cookies_exist"],
         "timestamp": datetime.now().isoformat()
     }
 
 
-# ============================================
-# ENDPOINTS DE LOGIN
-# ============================================
-@app.get("/login/status", response_model=LoginStatusResponse)
-async def login_status(api_key: str = Depends(verify_api_key)):
-    """Verifica se o scraper está logado"""
-    global scraper_instance, is_logged_in
-    
-    if not scraper_instance:
-        return LoginStatusResponse(
-            logged_in=False,
-            message="Scraper não inicializado. Use POST /login/init primeiro."
-        )
-    
-    try:
-        is_logged_in = await scraper_instance.verificar_login()
-        return LoginStatusResponse(
-            logged_in=is_logged_in,
-            message="Logado como afiliado" if is_logged_in else "Não está logado"
-        )
-    except Exception as e:
-        return LoginStatusResponse(
-            logged_in=False,
-            message=f"Erro ao verificar: {str(e)}"
-        )
-
-
-@app.post("/login/init")
-async def login_init(api_key: str = Depends(verify_api_key)):
+@app.get("/auth/status", response_model=AuthStatusResponse)
+async def auth_status(api_key: str = Depends(verify_api_key)):
     """
-    Inicializa o browser para login manual.
+    Verifica status dos cookies de autenticacao.
 
-    ⚠️ ATENÇÃO: Funciona apenas localmente (não funciona na VPS sem X server)
+    Este endpoint e RAPIDO pois NAO abre o browser.
+    Apenas verifica se os arquivos de cookies existem e se estao dentro da validade.
 
-    Para fazer login na VPS:
-    1. Execute localmente: python login_manual.py
-    2. Sincronize cookies: ./sync_to_vps.ps1
+    Para verificacao completa (abre browser e testa login real), use GET /auth/check
     """
-    global scraper_instance, is_logged_in
+    cookies_info = check_cookies_files()
 
-    # Detecta se está rodando em ambiente sem display (VPS)
-    if not os.environ.get("DISPLAY"):
-        raise HTTPException(
-            status_code=501,
-            detail={
-                "error": "Login visual não suportado na VPS (sem X server)",
-                "solution": [
-                    "1. Execute localmente: python login_manual.py",
-                    "2. Sincronize cookies: ./sync_to_vps.ps1"
-                ]
-            }
+    # Sem cookies
+    if not cookies_info["cookies_exist"]:
+        return AuthStatusResponse(
+            cookies_exist=False,
+            cookies_valid=False,
+            message="Cookies nao encontrados. Login necessario.",
+            action_required="Execute localmente: python login_local.py && ./sync_to_vps.ps1"
         )
 
+    # Com cookies mas sem metadata
+    if not cookies_info.get("metadata_exist"):
+        return AuthStatusResponse(
+            cookies_exist=True,
+            cookies_valid=False,
+            login_date=None,
+            message="Cookies existem mas sem metadata. Validade desconhecida.",
+            action_required="Recomendado refazer login para ter controle de validade"
+        )
+
+    # Com cookies e metadata
+    days_until_expiry = cookies_info.get("days_until_expiry", 0)
+
+    if days_until_expiry <= 0:
+        return AuthStatusResponse(
+            cookies_exist=True,
+            cookies_valid=False,
+            login_date=cookies_info.get("login_date"),
+            days_since_login=cookies_info.get("days_since_login"),
+            days_until_expiry=days_until_expiry,
+            message="Cookies EXPIRADOS!",
+            action_required="Execute localmente: python login_local.py && ./sync_to_vps.ps1"
+        )
+
+    if days_until_expiry <= 2:
+        return AuthStatusResponse(
+            cookies_exist=True,
+            cookies_valid=True,
+            login_date=cookies_info.get("login_date"),
+            days_since_login=cookies_info.get("days_since_login"),
+            days_until_expiry=days_until_expiry,
+            message=f"Cookies validos mas EXPIRANDO EM {days_until_expiry} DIAS!",
+            action_required="Recomendado refazer login em breve"
+        )
+
+    return AuthStatusResponse(
+        cookies_exist=True,
+        cookies_valid=True,
+        login_date=cookies_info.get("login_date"),
+        days_since_login=cookies_info.get("days_since_login"),
+        days_until_expiry=days_until_expiry,
+        message=f"Cookies validos. Expiram em {days_until_expiry} dias."
+    )
+
+
+@app.get("/auth/check")
+async def auth_check(api_key: str = Depends(verify_api_key)):
+    """
+    Verifica login REAL abrindo o browser e testando no site.
+
+    ATENCAO: Este endpoint e LENTO (5-15 segundos) pois abre o browser.
+    Use GET /auth/status para verificacao rapida.
+
+    Este endpoint e util para confirmar que os cookies realmente funcionam
+    antes de executar um scraping grande.
+    """
+    global scraper_instance
+
     try:
-        # Fecha instância anterior se existir
+        # Fecha instancia anterior se existir
         if scraper_instance:
-            await scraper_instance._close_browser()
+            try:
+                await scraper_instance._close_browser()
+            except:
+                pass
+            scraper_instance = None
 
-        # Cria nova instância com headless=False
+        # Cria nova instancia
         scraper_instance = ScraperMLAfiliado(
-            headless=False,  # Precisa ver o navegador
+            headless=True,
             wait_ms=1500,
-            max_produtos=50
+            max_produtos=1
         )
         await scraper_instance._init_browser()
 
-        # Navega para a página inicial
-        await scraper_instance.page.goto("https://www.mercadolivre.com.br")
+        # Verifica login
+        is_logged_in = await scraper_instance.verificar_login()
 
-        return {
-            "success": True,
-            "message": "Browser iniciado. Faça login manualmente.",
-            "next_step": "Após fazer login, chame GET /login/status para verificar"
-        }
+        # Fecha browser apos verificacao
+        await scraper_instance._close_browser()
+        scraper_instance = None
+
+        if is_logged_in:
+            return {
+                "logged_in": True,
+                "message": "Login de afiliado confirmado! Pronto para scraping.",
+                "checked_at": datetime.now().isoformat()
+            }
+        else:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "logged_in": False,
+                    "message": "NAO esta logado como afiliado!",
+                    "action_required": "Execute localmente: python login_local.py && ./sync_to_vps.ps1",
+                    "checked_at": datetime.now().isoformat()
+                }
+            )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Garante que browser seja fechado em caso de erro
+        if scraper_instance:
+            try:
+                await scraper_instance._close_browser()
+            except:
+                pass
+            scraper_instance = None
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "logged_in": False,
+                "error": str(e),
+                "message": "Erro ao verificar login",
+                "checked_at": datetime.now().isoformat()
+            }
+        )
 
 
-# ============================================
-# ENDPOINTS DE SCRAPING
-# ============================================
 @app.post("/scrape/ofertas", response_model=ScrapeResponse)
 async def scrape_ofertas(request: ScrapeRequest, api_key: str = Depends(verify_api_key)):
     """
     Executa scraping das ofertas do ML com links de afiliado.
-    
-    Requer que o login tenha sido feito previamente.
+
+    Requer que os cookies de login estejam configurados.
+    Verifique com GET /auth/status antes de executar.
     """
-    global scraper_instance, is_logged_in
-    
+    global scraper_instance
+
     try:
-        # Inicializa scraper se necessário
-        if not scraper_instance:
-            scraper_instance = ScraperMLAfiliado(
-                headless=request.headless,
-                wait_ms=1500,
-                max_produtos=request.max_produtos
-            )
-            await scraper_instance._init_browser()
-        
-        # Verifica login
-        is_logged_in = await scraper_instance.verificar_login()
-        
-        if not is_logged_in:
+        # Fecha instancia anterior se existir (evita conflito de sessao)
+        if scraper_instance:
+            try:
+                await scraper_instance._close_browser()
+            except:
+                pass
+            scraper_instance = None
+
+        # Verifica cookies primeiro (rapido)
+        cookies_info = check_cookies_files()
+        if not cookies_info["cookies_exist"]:
             raise HTTPException(
                 status_code=401,
-                detail="Não está logado. Use POST /login/init e faça login manual primeiro."
+                detail={
+                    "error": "Cookies nao encontrados",
+                    "action": "Execute localmente: python login_local.py && ./sync_to_vps.ps1"
+                }
             )
-        
+
+        # Inicializa scraper
+        scraper_instance = ScraperMLAfiliado(
+            headless=request.headless,
+            wait_ms=1500,
+            max_produtos=request.max_produtos
+        )
+        await scraper_instance._init_browser()
+
+        # Verifica login real
+        is_logged_in = await scraper_instance.verificar_login()
+
+        if not is_logged_in:
+            await scraper_instance._close_browser()
+            scraper_instance = None
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "Nao esta logado como afiliado",
+                    "action": "Execute localmente: python login_local.py && ./sync_to_vps.ps1"
+                }
+            )
+
         # Executa scraping
         produtos = await scraper_instance.scrape_ofertas(
             url=request.url,
             max_produtos=request.max_produtos
         )
-        
-        # Calcula estatísticas
+
+        # Fecha browser apos scraping
+        await scraper_instance._close_browser()
+        scraper_instance = None
+
+        # Calcula estatisticas
         total_com_link = sum(1 for p in produtos if p.get("url_curta"))
         total_sem_link = len(produtos) - total_com_link
-        
+
         return ScrapeResponse(
             success=True,
             total=len(produtos),
             total_com_link=total_com_link,
             total_sem_link=total_sem_link,
             produtos=produtos,
-            scraped_at=datetime.now().isoformat(),
-            source=request.url or "https://www.mercadolivre.com.br/ofertas"
+            scraped_at=datetime.now().isoformat()
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
+        # Garante que browser seja fechado
+        if scraper_instance:
+            try:
+                await scraper_instance._close_browser()
+            except:
+                pass
+            scraper_instance = None
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/scrape/ofertas/relampago", response_model=ScrapeResponse)
 async def scrape_ofertas_relampago(request: ScrapeRequest, api_key: str = Depends(verify_api_key)):
-    """Scraping específico para ofertas relâmpago"""
+    """Scraping especifico para ofertas relampago"""
     request.url = "https://www.mercadolivre.com.br/ofertas#deal_type=lightning"
     return await scrape_ofertas(request, api_key)
 
 
-# ============================================
-# ENDPOINT PARA n8n (WEBHOOK SIMPLIFICADO)
-# ============================================
-@app.post("/webhook/scrape")
-async def webhook_scrape(
-    max_produtos: int = 50,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Endpoint simplificado para n8n/webhooks.
-    Retorna apenas os produtos com link de afiliado válido.
-    """
-    global scraper_instance, is_logged_in
-    
-    try:
-        if not scraper_instance:
-            scraper_instance = ScraperMLAfiliado(
-                headless=True,
-                max_produtos=max_produtos
-            )
-            await scraper_instance._init_browser()
-        
-        is_logged_in = await scraper_instance.verificar_login()
-        
-        if not is_logged_in:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "Não está logado", "action": "Faça login em POST /login/init"}
-            )
-        
-        produtos = await scraper_instance.scrape_ofertas(max_produtos=max_produtos)
-        
-        # Filtra apenas produtos com link válido
-        produtos_validos = [
-            {
-                "nome": p["nome"],
-                "preco": p["preco_atual"],
-                "preco_original": p["preco_original"],
-                "desconto": p["desconto"],
-                "foto": p["foto_url"],
-                "link": p["url_curta"],
-                "mlb_id": p["mlb_id"]
-            }
-            for p in produtos
-            if p.get("url_curta")
-        ]
-        
-        return {
-            "success": True,
-            "total": len(produtos_validos),
-            "produtos": produtos_validos,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

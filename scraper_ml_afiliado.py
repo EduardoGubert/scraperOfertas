@@ -326,7 +326,11 @@ class ScraperMLAfiliado:
         url = url or self.URL_OFERTAS
         
         print(f"\n🔄 Acessando página de ofertas: {url}")
-        await self.page.goto(url, wait_until='networkidle', timeout=30000)
+        
+        # MUDANÇA 3: Também usa domcontentloaded aqui
+        await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        print(f"   ✅ Página de ofertas carregada")
+        
         await self._human_delay(1500, 2500)
         
         # Scroll para carregar mais produtos
@@ -383,40 +387,28 @@ class ScraperMLAfiliado:
         try:
             # Acessa a página do produto
             print(f"  📦 Acessando: {url[:60]}...")
-            await self.page.goto(url, wait_until='networkidle', timeout=30000)
+            
+            # MUDANÇA 1: Usa 'domcontentloaded' ao invés de 'networkidle'
+            # É mais rápido e não espera todas as requisições pararem
+            await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            print(f"     ✅ Página carregada (DOM pronto)")
+            
+            # MUDANÇA 2: Aguarda elementos essenciais aparecerem ao invés de networkidle
+            try:
+                await self.page.wait_for_selector('h1, .ui-pdp-title', timeout=10000)
+                print(f"     ✅ Título do produto visível")
+            except Exception as e:
+                print(f"     ⚠️ Timeout aguardando título: {e}")
+                # Continua mesmo assim, pode ser que a página já tenha carregado
+            
             await self._human_delay(1000, 2000)
-
-            # CRÍTICO: Verificar se está logado NESTA página
-            # O botão "Compartilhar" só aparece se estiver logado como afiliado
-            logged_in_product_page = await self.page.query_selector(
-                "[class*='affiliate'], [class*='nav-affiliate'], :text('Afiliados')"
-            )
-
-            if not logged_in_product_page:
-                print("     ⚠️ Não está logado na página do produto! Tentando recarregar...")
-                # Força reload para garantir que cookies sejam aplicados
-                await self.page.reload(wait_until='networkidle')
-                await self._human_delay(2000, 3000)
-
-                # Verifica novamente
-                logged_in_product_page = await self.page.query_selector(
-                    "[class*='affiliate'], [class*='nav-affiliate'], :text('Afiliados')"
-                )
-
-                if not logged_in_product_page:
-                    print("     ❌ Login perdido na página do produto! Pulando extração.")
-                    produto["status"] = "sem_login"
-                    produto["erro"] = "Login de afiliado não ativo na página do produto"
-                    return produto
-                else:
-                    print("     ✅ Login restaurado após reload!")
-            else:
-                print("     ✅ Login de afiliado ativo na página")
-
+            
             # Extrai MLB ID da URL
             mlb_match = re.search(r'MLB[-]?(\d+)', url)
             if mlb_match:
                 produto["mlb_id"] = f"MLB{mlb_match.group(1)}"
+            
+            print(f"     🔍 Extraindo dados do produto...")
             
             # Extrai dados básicos via JS
             dados = await self.page.evaluate("""
@@ -424,11 +416,11 @@ class ScraperMLAfiliado:
                     const dados = {};
                     
                     // Nome
-                    const titulo = document.querySelector('h1.ui-pdp-title, .ui-pdp-title');
+                    const titulo = document.querySelector('h1.ui-pdp-title, .ui-pdp-title, h1');
                     dados.nome = titulo?.textContent?.trim() || '';
                     
                     // Foto
-                    const foto = document.querySelector('.ui-pdp-image, img[data-zoom]');
+                    const foto = document.querySelector('.ui-pdp-image, img[data-zoom], .ui-pdp-gallery__figure img');
                     dados.foto = foto?.src || foto?.dataset?.src || '';
                     
                     // Preço atual
@@ -453,6 +445,8 @@ class ScraperMLAfiliado:
             produto["preco_original"] = self._parse_preco(dados.get("preco_original"))
             produto["desconto"] = self._parse_desconto(dados.get("desconto"))
             
+            print(f"     ✅ Dados extraídos: {produto['nome'][:40] if produto['nome'] else 'N/A'}...")
+            
             # ===================================
             # EXTRAI LINK DE AFILIADO
             # ===================================
@@ -471,7 +465,9 @@ class ScraperMLAfiliado:
         except Exception as e:
             produto["status"] = "erro"
             produto["erro"] = str(e)
-            print(f"     ❌ Erro: {e}")
+            print(f"     ❌ Erro na extração: {e}")
+            import traceback
+            print(f"     📋 Stack trace: {traceback.format_exc()}")
         
         return produto
     
@@ -485,25 +481,46 @@ class ScraperMLAfiliado:
         try:
             print("     🔍 Procurando botão Compartilhar...")
 
-            # Debug: Verificar se elementos de afiliado existem na página
-            afiliado_exists = await self.page.query_selector("[class*='affiliate'], :text('Afiliados')")
-            if afiliado_exists:
-                print("     ✅ Elementos de afiliado detectados na página")
-            else:
-                print("     ⚠️ ATENÇÃO: Elementos de afiliado NÃO encontrados!")
+            btn_compartilhar = None
+            
+            # MÉTODO 1: XPath específico (mais rápido e confiável se estrutura não mudou)
+            try:
+                btn_compartilhar = await self.page.wait_for_selector(
+                    "xpath=/html/body/div[1]/nav/div/div[3]/div[2]/div/button",
+                    timeout=5000
+                )
+                if btn_compartilhar:
+                    print("     ✅ Botão encontrado via XPath!")
+            except:
+                print("     ⚠️ XPath falhou, tentando fallback...")
 
-            # Procura o botão Compartilhar na barra de afiliados
-            # Baseado na imagem: botão azul "Compartilhar" no canto superior direito
-            btn_compartilhar = await self.page.wait_for_selector(
-                "button:has-text('Compartilhar'), [data-testid*='share'], a:has-text('Compartilhar')",
-                timeout=15000  # Aumentado de 5s para 15s
-            )
+            # MÉTODO 2: Busca no header/nav da página (fallback confiável)
+            if not btn_compartilhar:
+                try:
+                    btn_compartilhar = await self.page.wait_for_selector(
+                        "nav button:has-text('Compartilhar'), header button:has-text('Compartilhar')",
+                        timeout=5000
+                    )
+                    if btn_compartilhar:
+                        print("     ✅ Botão encontrado no header/nav!")
+                except:
+                    pass
+
+            # MÉTODO 3: Busca em qualquer lugar (último recurso)
+            if not btn_compartilhar:
+                try:
+                    btn_compartilhar = await self.page.wait_for_selector(
+                        "button:has-text('Compartilhar')",
+                        timeout=3000
+                    )
+                    if btn_compartilhar:
+                        print("     ✅ Botão encontrado na página!")
+                except:
+                    pass
 
             if not btn_compartilhar:
-                print("     ⚠️ Botão Compartilhar não encontrado")
+                print("     ⚠️ Botão Compartilhar não encontrado em nenhum método")
                 return None
-
-            print("     ✅ Botão Compartilhar encontrado!")
             
             # Clica no botão
             await btn_compartilhar.click()

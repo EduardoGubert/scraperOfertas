@@ -172,15 +172,33 @@ async def login_status(api_key: str = Depends(verify_api_key)):
 async def login_init(api_key: str = Depends(verify_api_key)):
     """
     Inicializa o browser para login manual.
-    IMPORTANTE: Use headless=False e acesse a VPS para fazer login.
+
+    ⚠️ ATENÇÃO: Funciona apenas localmente (não funciona na VPS sem X server)
+
+    Para fazer login na VPS:
+    1. Execute localmente: python login_manual.py
+    2. Sincronize cookies: ./sync_to_vps.ps1
     """
     global scraper_instance, is_logged_in
-    
+
+    # Detecta se está rodando em ambiente sem display (VPS)
+    if not os.environ.get("DISPLAY"):
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error": "Login visual não suportado na VPS (sem X server)",
+                "solution": [
+                    "1. Execute localmente: python login_manual.py",
+                    "2. Sincronize cookies: ./sync_to_vps.ps1"
+                ]
+            }
+        )
+
     try:
         # Fecha instância anterior se existir
         if scraper_instance:
             await scraper_instance._close_browser()
-        
+
         # Cria nova instância com headless=False
         scraper_instance = ScraperMLAfiliado(
             headless=False,  # Precisa ver o navegador
@@ -188,16 +206,16 @@ async def login_init(api_key: str = Depends(verify_api_key)):
             max_produtos=50
         )
         await scraper_instance._init_browser()
-        
+
         # Navega para a página inicial
         await scraper_instance.page.goto("https://www.mercadolivre.com.br")
-        
+
         return {
             "success": True,
-            "message": "Browser iniciado. Acesse a VPS e faça login manualmente.",
+            "message": "Browser iniciado. Faça login manualmente.",
             "next_step": "Após fazer login, chame GET /login/status para verificar"
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

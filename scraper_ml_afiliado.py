@@ -469,48 +469,121 @@ class ScraperMLAfiliado:
             
             # Clica no botão
             await btn_compartilhar.click()
-            await self._human_delay(800, 1500)
-            
-            # Aguarda o modal aparecer e extrai os dados
-            # Baseado na imagem 3: modal com "Link do produto" e "ID do produto"
-            
-            # Tenta extrair o link do modal
-            resultado = await self.page.evaluate("""
-                () => {
-                    const resultado = {};
-                    
-                    // Procura input com o link
-                    const inputs = document.querySelectorAll('input[type="text"], input[readonly]');
-                    for (const input of inputs) {
-                        const value = input.value || '';
-                        if (value.includes('mercadolivre.com/sec/')) {
-                            resultado.url_curta = value;
+            await self._human_delay(1000, 2000)
+
+            # Aguarda o modal aparecer - usando múltiplos seletores
+            await self.page.wait_for_selector(
+                "input[value*='mercadolivre.com/sec'], input[value*='meli.to'], div:has-text('Link do produto')",
+                timeout=5000
+            )
+
+            await self._human_delay(500, 1000)
+
+            # MÉTODO 1: Tenta extrair usando o XPath específico do modal
+            resultado = {}
+
+            try:
+                # Usa o XPath fornecido como base para encontrar o input
+                xpath_base = "/html/body/div[1]/nav/div/div[3]/div[2]/div[2]/div/div/div/div/div[2]/div/div/div/div[2]/div/div"
+                elemento_xpath = await self.page.query_selector(f"xpath={xpath_base}")
+
+                if elemento_xpath:
+                    # Procura input dentro desse elemento
+                    input_link = await elemento_xpath.query_selector("input[type='text'], input[readonly]")
+                    if input_link:
+                        url_curta = await input_link.get_attribute("value")
+                        if url_curta and ("mercadolivre.com/sec/" in url_curta or "meli.to/" in url_curta):
+                            resultado["url_curta"] = url_curta.strip()
+                            print(f"     ✅ Link extraído via XPath: {url_curta[:50]}...")
+            except Exception as e:
+                print(f"     ⚠️ XPath não funcionou: {e}")
+
+            # MÉTODO 2: Busca todos os inputs visíveis com link
+            if not resultado.get("url_curta"):
+                try:
+                    inputs = await self.page.query_selector_all("input[type='text'], input[readonly]")
+                    for input_elem in inputs:
+                        value = await input_elem.get_attribute("value") or ""
+                        if "mercadolivre.com/sec/" in value or "meli.to/" in value:
+                            resultado["url_curta"] = value.strip()
+                            print(f"     ✅ Link extraído via input: {value[:50]}...")
+                            break
+                except Exception as e:
+                    print(f"     ⚠️ Busca por inputs falhou: {e}")
+
+            # MÉTODO 3: Tenta copiar clicando no botão de copiar
+            if not resultado.get("url_curta"):
+                try:
+                    # Procura botão de copiar
+                    btn_copiar = await self.page.query_selector(
+                        "button:has-text('Copiar'), button[aria-label*='Copiar'], [class*='copy'] button"
+                    )
+
+                    if btn_copiar:
+                        # Clica para copiar
+                        await btn_copiar.click()
+                        await self._human_delay(300, 600)
+
+                        # Tenta ler do clipboard via JS
+                        clipboard_text = await self.page.evaluate("""
+                            async () => {
+                                try {
+                                    const text = await navigator.clipboard.readText();
+                                    return text;
+                                } catch {
+                                    return null;
+                                }
+                            }
+                        """)
+
+                        if clipboard_text and ("mercadolivre.com/sec/" in clipboard_text or "meli.to/" in clipboard_text):
+                            resultado["url_curta"] = clipboard_text.strip()
+                            print(f"     ✅ Link copiado do clipboard: {clipboard_text[:50]}...")
+                except Exception as e:
+                    print(f"     ⚠️ Método clipboard falhou: {e}")
+
+            # MÉTODO 4: Busca via JavaScript (fallback)
+            if not resultado.get("url_curta"):
+                try:
+                    js_resultado = await self.page.evaluate("""
+                        () => {
+                            // Procura em todos os elementos de texto
+                            const allElements = document.querySelectorAll('*');
+                            for (const el of allElements) {
+                                const text = el.textContent || el.innerText || el.value || '';
+                                if (text.includes('mercadolivre.com/sec/') || text.includes('meli.to/')) {
+                                    // Extrai URL
+                                    const match = text.match(/(https?:\\/\\/[\\w.-]+\\/sec\\/[\\w-]+)|(https?:\\/\\/meli\\.to\\/[\\w-]+)/);
+                                    if (match) {
+                                        return match[0];
+                                    }
+                                }
+                            }
+                            return null;
                         }
-                    }
-                    
-                    // Procura elementos de texto com o link
-                    const textos = document.querySelectorAll('[class*="link"], [class*="copy"]');
-                    for (const el of textos) {
-                        const text = el.textContent || el.value || '';
-                        if (text.includes('mercadolivre.com/sec/')) {
-                            resultado.url_curta = text.trim();
-                        }
-                    }
-                    
-                    // Procura o ID do produto
-                    const idMatch = document.body.innerHTML.match(/[A-Z0-9]{6,}-[A-Z0-9]{4,}/);
-                    if (idMatch) {
-                        resultado.product_id = idMatch[0];
-                    }
-                    
-                    return resultado;
-                }
-            """)
-            
+                    """)
+
+                    if js_resultado:
+                        resultado["url_curta"] = js_resultado.strip()
+                        print(f"     ✅ Link extraído via JS: {js_resultado[:50]}...")
+                except Exception as e:
+                    print(f"     ⚠️ Busca via JS falhou: {e}")
+
+            # Extrai ID do produto se possível
+            try:
+                id_inputs = await self.page.query_selector_all("input[value*='-']")
+                for input_elem in id_inputs:
+                    value = await input_elem.get_attribute("value") or ""
+                    if re.match(r'^[A-Z0-9]{6,}-[A-Z0-9]{4,}$', value):
+                        resultado["product_id"] = value
+                        break
+            except:
+                pass
+
             # Fecha o modal
             try:
                 close_btn = await self.page.query_selector(
-                    "[class*='close'], button[aria-label='Fechar'], [class*='modal'] button"
+                    "[class*='close'], button[aria-label='Fechar'], [class*='modal'] button, button:has-text('Fechar')"
                 )
                 if close_btn:
                     await close_btn.click()
@@ -518,12 +591,13 @@ class ScraperMLAfiliado:
                     await self.page.keyboard.press('Escape')
             except:
                 await self.page.keyboard.press('Escape')
-            
+
             await self._human_delay(300, 600)
-            
+
             if resultado.get("url_curta"):
                 return resultado
-            
+
+            print("     ⚠️ Nenhum método conseguiu extrair o link")
             return None
             
         except Exception as e:

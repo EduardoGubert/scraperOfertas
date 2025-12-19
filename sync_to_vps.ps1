@@ -15,7 +15,7 @@
 # CONFIGURAÇÕES - ALTERE AQUI!
 $VPS_USER = "root"
 $VPS_HOST = "72.60.51.81"
-$VPS_PATH = "/root/scraper-ml"
+$VPS_PATH = "/root/scraperofertas_2"
 $SSH_KEY = ""
 
 # ============================================

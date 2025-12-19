@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  scraper:
+    image: eduardogubert/scraperofertas:latest
+    networks:
+      - network_public
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCRAPER_API_KEY=${SCRAPER_API_KEY:-egn-2024-SuaChaveSecretaAqui}
+      - ML_MATT_TOOL=${ML_MATT_TOOL:-39349855}
+      - ML_MATT_WORD=${ML_MATT_WORD:-egnofertas}
+      - MAGALU_SHOWCASE=${MAGALU_SHOWCASE:-magazinegubert}
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.scraper.rule=Host(`scraperofertas.soluztions.shop`)"
+        - "traefik.http.routers.scraper.entrypoints=websecure"
+        - "traefik.http.routers.scraper.tls=true"
+        - "traefik.http.routers.scraper.tls.certresolver=letsencrypt"
+        - "traefik.http.services.scraper.loadbalancer.server.port=8000"
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  scraper-ml-afiliado:
+    image: eduardogubert/scraper-ml-afiliado:latest
+    networks:
+      - network_public
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=:99
+      - SCRAPER_API_KEY=${SCRAPER_API_KEY:-egn-2024-SuaChaveSecretaAqui}
+    volumes:
+      - /root/scraper-ml/ml_browser_data:/app/ml_browser_data
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.scraper-ml-afiliado.rule=Host(`scraperofertas.soluztions.shop`) && PathPrefix(`/ml`)"
+        - "traefik.http.routers.scraper-ml-afiliado.entrypoints=websecure"
+        - "traefik.http.routers.scraper-ml-afiliado.tls=true"
+        - "traefik.http.routers.scraper-ml-afiliado.tls.certresolver=letsencrypt"
+        - "traefik.http.services.scraper-ml-afiliado.loadbalancer.server.port=8000"
+        - "traefik.http.middlewares.scraper-ml-strip.stripprefix.prefixes=/ml"
+        - "traefik.http.routers.scraper-ml-afiliado.middlewares=scraper-ml-strip"
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+networks:
+  network_public:
+    external: true

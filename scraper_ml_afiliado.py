@@ -385,7 +385,34 @@ class ScraperMLAfiliado:
             print(f"  📦 Acessando: {url[:60]}...")
             await self.page.goto(url, wait_until='networkidle', timeout=30000)
             await self._human_delay(1000, 2000)
-            
+
+            # CRÍTICO: Verificar se está logado NESTA página
+            # O botão "Compartilhar" só aparece se estiver logado como afiliado
+            logged_in_product_page = await self.page.query_selector(
+                "[class*='affiliate'], [class*='nav-affiliate'], :text('Afiliados')"
+            )
+
+            if not logged_in_product_page:
+                print("     ⚠️ Não está logado na página do produto! Tentando recarregar...")
+                # Força reload para garantir que cookies sejam aplicados
+                await self.page.reload(wait_until='networkidle')
+                await self._human_delay(2000, 3000)
+
+                # Verifica novamente
+                logged_in_product_page = await self.page.query_selector(
+                    "[class*='affiliate'], [class*='nav-affiliate'], :text('Afiliados')"
+                )
+
+                if not logged_in_product_page:
+                    print("     ❌ Login perdido na página do produto! Pulando extração.")
+                    produto["status"] = "sem_login"
+                    produto["erro"] = "Login de afiliado não ativo na página do produto"
+                    return produto
+                else:
+                    print("     ✅ Login restaurado após reload!")
+            else:
+                print("     ✅ Login de afiliado ativo na página")
+
             # Extrai MLB ID da URL
             mlb_match = re.search(r'MLB[-]?(\d+)', url)
             if mlb_match:
@@ -456,16 +483,27 @@ class ScraperMLAfiliado:
             Dict com url_curta, url_longa, product_id ou None se falhar
         """
         try:
+            print("     🔍 Procurando botão Compartilhar...")
+
+            # Debug: Verificar se elementos de afiliado existem na página
+            afiliado_exists = await self.page.query_selector("[class*='affiliate'], :text('Afiliados')")
+            if afiliado_exists:
+                print("     ✅ Elementos de afiliado detectados na página")
+            else:
+                print("     ⚠️ ATENÇÃO: Elementos de afiliado NÃO encontrados!")
+
             # Procura o botão Compartilhar na barra de afiliados
             # Baseado na imagem: botão azul "Compartilhar" no canto superior direito
             btn_compartilhar = await self.page.wait_for_selector(
                 "button:has-text('Compartilhar'), [data-testid*='share'], a:has-text('Compartilhar')",
-                timeout=5000
+                timeout=15000  # Aumentado de 5s para 15s
             )
-            
+
             if not btn_compartilhar:
                 print("     ⚠️ Botão Compartilhar não encontrado")
                 return None
+
+            print("     ✅ Botão Compartilhar encontrado!")
             
             # Clica no botão
             await btn_compartilhar.click()

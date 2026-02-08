@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   scraper-ml-afiliado:
-    image: ghcr.io/eduardogubert/scraper-ml-afiliado:latest
+    image: eduardogubert/scraperOfertas:latest
     networks:
       - network_public
       - network_private

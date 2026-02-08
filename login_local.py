@@ -128,6 +128,8 @@ LOGIN - MERCADO LIVRE AFILIADO
         response = input("\nDeseja fazer login novamente? (s/N): ").lower()
         if response != 's':
             print("\n[OK] Usando login existente")
+            await context.close()
+            await browser.close()
             export_cookies()
             return True
 
@@ -151,6 +153,8 @@ LOGIN - MERCADO LIVRE AFILIADO
         if is_logged:
             save_metadata()
             print("\n[OK] Login salvo com sucesso!")
+            await context.close()
+            await browser.close()
             export_cookies()
             return True
         else:
@@ -195,7 +199,7 @@ if __name__ == "__main__":
         cmd = sys.argv[1]
         if cmd == "--status":
             show_status()
-        elif cmd == "--export":
+        elif cmd == "--export":            
             export_cookies()
         else:
             print(f"Comando desconhecido: {cmd}")

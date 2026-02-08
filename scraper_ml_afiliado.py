@@ -63,12 +63,15 @@ class ScraperMLAfiliado:
         headless: bool = False,  # False para ver o navegador durante login
         wait_ms: int = 1500,
         max_produtos: int = 50,
-        etiqueta: str = "egnofertas"
+        etiqueta: str = "egnofertas",
+        user_data_dir: Optional[str] = None  # Permite customizar caminho dos cookies
     ):
         self.headless = headless
         self.wait_ms = wait_ms
         self.max_produtos = max_produtos
         self.etiqueta = etiqueta
+        # Se user_data_dir for fornecido, usa ele; caso contrário usa o padrão
+        self.user_data_dir = user_data_dir or self.USER_DATA_DIR
         
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
@@ -86,12 +89,17 @@ class ScraperMLAfiliado:
         """Inicializa o browser com contexto persistente e anti-detecção avançada"""
         self.playwright = await async_playwright().start()
         
+        # Detecta se está rodando em Docker (sem Chrome instalado)
+        is_docker = os.path.exists("/app")
+        browser_channel = None if is_docker else "chrome"
+        
         # Usa contexto persistente para manter login
         # IMPORTANTE: channel="chrome" usa o Chrome real instalado (melhor para CAPTCHA)
+        # No Docker, usa None para usar Chromium embutido do Playwright
         self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=self.USER_DATA_DIR,
+            user_data_dir=self.user_data_dir,
             headless=self.headless,
-            channel="chrome",  # Usa Chrome real ao invés do Chromium
+            channel=browser_channel,  # Chrome local ou Chromium no Docker
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             locale='pt-BR',

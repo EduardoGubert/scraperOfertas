@@ -289,7 +289,8 @@ async def auth_check(api_key: str = Depends(verify_api_key)):
         scraper_instance = ScraperMLAfiliado(
             headless=True,
             wait_ms=1500,
-            max_produtos=1
+            max_produtos=1,
+            user_data_dir=BROWSER_DATA_DIR
         )
         await scraper_instance._init_browser()
 
@@ -371,7 +372,8 @@ async def scrape_ofertas(request: ScrapeRequest, api_key: str = Depends(verify_a
         scraper_instance = ScraperMLAfiliado(
             headless=request.headless,
             wait_ms=1500,
-            max_produtos=request.max_produtos
+            max_produtos=request.max_produtos,
+            user_data_dir=BROWSER_DATA_DIR
         )
         await scraper_instance._init_browser()
 

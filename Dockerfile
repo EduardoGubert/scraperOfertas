@@ -43,13 +43,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
-# Instala Google Chrome (necessário para alguns scripts específicos)
-RUN curl -O https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get update \
-    && apt-get install -y ./google-chrome-stable_current_amd64.deb \
-    && rm google-chrome-stable_current_amd64.deb \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copia código
 COPY scraper_ml_afiliado.py .
 COPY api_ml_afiliado.py .

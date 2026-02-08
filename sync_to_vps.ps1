@@ -13,7 +13,7 @@
 $VPS_USER = "root"
 $VPS_HOST = "72.60.51.81"
 $VPS_PATH = "/root/scraperOfertas"
-$STACK_NAME = "scraperofertas_2"
+$STACK_NAME = "scraperofertas"
 $SERVICE_NAME = "${STACK_NAME}_scraper-ml-afiliado"
 
 # ============================================

@@ -427,8 +427,26 @@ class ScraperMLAfiliado:
                     const titulo = document.querySelector('h1.ui-pdp-title, .ui-pdp-title, h1');
                     dados.nome = titulo?.textContent?.trim() || '';
                     
-                    // Foto
-                    const foto = document.querySelector('.ui-pdp-image, img[data-zoom], .ui-pdp-gallery__figure img');
+                    // Foto - Seletores atualizados
+                    let foto = null;
+                    
+                    // XPath específico fornecido pelo usuário
+                    const xpathResult = document.evaluate('/html/body/main/div[2]/div[5]/div[2]/div[1]/div/div[2]/div[1]/div/div/div[1]/span[1]/figure/img', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                    if (xpathResult.singleNodeValue) {
+                        foto = xpathResult.singleNodeValue;
+                    }
+                    
+                    // Fallbacks se o XPath não funcionar
+                    if (!foto) {
+                        foto = document.querySelector('main figure img, .ui-pdp-gallery figure img, span figure img, .ui-pdp-gallery__figure img');
+                    }
+                    if (!foto) {
+                        foto = document.querySelector('.ui-pdp-image, img[data-zoom], .ui-pdp-gallery__figure img');
+                    }
+                    if (!foto) {
+                        foto = document.querySelector('img[src*="mlstatic"], img[src*="mercadolivre"]');
+                    }
+                    
                     dados.foto = foto?.src || foto?.dataset?.src || '';
                     
                     // Preço atual
@@ -454,6 +472,12 @@ class ScraperMLAfiliado:
             produto["desconto"] = self._parse_desconto(dados.get("desconto"))
             
             print(f"     ✅ Dados extraídos: {produto['nome'][:40] if produto['nome'] else 'N/A'}...")
+            
+            # Log da extração de foto
+            if produto["foto_url"]:
+                print(f"     🖼️ Foto extraída: {produto['foto_url'][:50]}...")
+            else:
+                print(f"     ⚠️ Foto não encontrada com os seletores atuais")
             
             # ===================================
             # EXTRAI LINK DE AFILIADO

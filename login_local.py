@@ -128,8 +128,6 @@ LOGIN - MERCADO LIVRE AFILIADO
         response = input("\nDeseja fazer login novamente? (s/N): ").lower()
         if response != 's':
             print("\n[OK] Usando login existente")
-            await context.close()
-            await browser.close()
             export_cookies()
             return True
 
@@ -151,10 +149,12 @@ LOGIN - MERCADO LIVRE AFILIADO
         is_logged = await scraper.verificar_login()
 
         if is_logged:
+            print("\n[OK] Login detectado!")
+            # Salva metadata ANTES de fechar
             save_metadata()
-            print("\n[OK] Login salvo com sucesso!")
-            await context.close()
-            await browser.close()
+            # scraper.close() será chamado automaticamente pelo async with
+            print("[OK] Cookies salvos com sucesso!")
+            # Agora exporta
             export_cookies()
             return True
         else:

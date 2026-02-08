@@ -12,9 +12,10 @@ Fluxo:
 import asyncio
 import json
 import os
+import random
 import re
+import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
@@ -23,53 +24,21 @@ class ScraperMLAfiliado:
     """Scraper do Mercado Livre com autenticação de afiliado"""
     
     # Configurações
-    COOKIES_FILE = "ml_cookies.json"
     USER_DATA_DIR = "./ml_browser_data"
     
     # URLs
-    URL_LOGIN = "https://www.mercadolivre.com.br/login"
     URL_OFERTAS = "https://www.mercadolivre.com.br/ofertas"
-    URL_OFERTAS_RELAMPAGO = "https://www.mercadolivre.com.br/ofertas#nav-header"
-    
-    # Seletores (atualizados baseado nas imagens)
-    SELECTORS = {
-        # Página de ofertas
-        "produto_card": ".promotion-item, .poly-card, [class*='poly-card'], .andes-card",
-        "produto_link": "a[href*='/p/'], a[href*='MLB']",
-        "produto_nome": ".poly-card__title, .ui-search-item__title, h2",
-        "produto_preco": ".andes-money-amount__fraction, .poly-price__current .andes-money-amount__fraction",
-        "produto_preco_original": ".andes-money-amount--previous .andes-money-amount__fraction, s .andes-money-amount__fraction",
-        "produto_desconto": "[class*='discount'], .poly-price__off, .andes-money-amount__discount",
-        "produto_foto": "img[src*='mlstatic'], img[data-src*='mlstatic']",
-        
-        # Barra de afiliados (dentro da página do produto)
-        "barra_afiliados": "[class*='affiliate'], [class*='Afiliados']",
-        "btn_compartilhar": "button:has-text('Compartilhar'), [class*='share'] button, a:has-text('Compartilhar')",
-        
-        # Modal de compartilhar
-        "modal_link": "input[type='text'][value*='mercadolivre.com/sec'], [class*='link'] input",
-        "modal_link_texto": "[class*='link-text'], [class*='copyable']",
-        "modal_close": "[class*='close'], button[aria-label='Fechar']",
-        
-        # Login
-        "input_email": "input[name='user_id'], input[type='email'], #user_id",
-        "input_senha": "input[name='password'], input[type='password'], #password",
-        "btn_continuar": "button[type='submit'], button:has-text('Continuar')",
-        "btn_entrar": "button[type='submit'], button:has-text('Entrar')",
-    }
     
     def __init__(
         self, 
         headless: bool = False,  # False para ver o navegador durante login
         wait_ms: int = 1500,
         max_produtos: int = 50,
-        etiqueta: str = "egnofertas",
         user_data_dir: Optional[str] = None  # Permite customizar caminho dos cookies
     ):
         self.headless = headless
         self.wait_ms = wait_ms
         self.max_produtos = max_produtos
-        self.etiqueta = etiqueta
         # Se user_data_dir for fornecido, usa ele; caso contrário usa o padrão
         self.user_data_dir = user_data_dir or self.USER_DATA_DIR
         
@@ -85,43 +54,102 @@ class ScraperMLAfiliado:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_browser()
     
+    def _limpar_locks_chrome(self):
+        """Remove arquivos de lock do Chrome que podem causar problemas"""
+        lock_files = [
+            "SingletonLock",
+            "SingletonSocket", 
+            "SingletonCookie",
+            "lockfile"
+        ]
+        
+        for lock_file in lock_files:
+            lock_path = os.path.join(self.user_data_dir, lock_file)
+            try:
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+                    print(f"🧹 Lock removido: {lock_file}")
+            except Exception as e:
+                # Ignora erros de permissão
+                pass
+    
     async def _init_browser(self):
         """Inicializa o browser com contexto persistente e anti-detecção avançada"""
         self.playwright = await async_playwright().start()
+        
+        # Limpa locks do Chrome antes de iniciar
+        self._limpar_locks_chrome()
         
         # Detecta se está rodando em Docker (sem Chrome instalado)
         is_docker = os.path.exists("/app")
         browser_channel = None if is_docker else "chrome"
         
-        # Usa contexto persistente para manter login
-        # IMPORTANTE: channel="chrome" usa o Chrome real instalado (melhor para CAPTCHA)
-        # No Docker, usa None para usar Chromium embutido do Playwright
-        self.context = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=self.user_data_dir,
-            headless=self.headless,
-            channel=browser_channel,  # Chrome local ou Chromium no Docker
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            locale='pt-BR',
-            timezone_id='America/Sao_Paulo',
-            geolocation={'latitude': -23.5505, 'longitude': -46.6333},  # São Paulo
-            permissions=['geolocation'],
-            color_scheme='light',
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-infobars',
-                '--disable-extensions',
-                '--disable-gpu',
-                '--window-size=1920,1080',
-                '--start-maximized',
-                # Flags importantes para reCAPTCHA
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--enable-features=NetworkService,NetworkServiceInProcess',
-            ],
-            ignore_default_args=['--enable-automation'],  # Remove flag de automação
-        )
+        # Tenta lançar com Chrome, se falhar usa Chromium
+        try:
+            # Usa contexto persistente para manter login
+            # IMPORTANTE: channel="chrome" usa o Chrome real instalado (melhor para CAPTCHA)
+            # No Docker, usa None para usar Chromium embutido do Playwright
+            self.context = await self.playwright.chromium.launch_persistent_context(
+                user_data_dir=self.user_data_dir,
+                headless=self.headless,
+                channel=browser_channel,  # Chrome local ou Chromium no Docker
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                locale='pt-BR',
+                timezone_id='America/Sao_Paulo',
+                geolocation={'latitude': -23.5505, 'longitude': -46.6333},  # São Paulo
+                permissions=['geolocation'],
+                color_scheme='light',
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-infobars',
+                    '--disable-extensions',
+                    '--disable-gpu',
+                    '--window-size=1920,1080',
+                    '--start-maximized',
+                    # Flags importantes para reCAPTCHA
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--enable-features=NetworkService,NetworkServiceInProcess',
+                ],
+                ignore_default_args=['--enable-automation'],  # Remove flag de automação
+            )
+            print(f"✅ Browser inicializado: {'Chrome' if browser_channel else 'Chromium'}")
+        
+        except Exception as e:
+            if browser_channel == "chrome":
+                print(f"⚠️ Falha ao lançar Chrome: {e}")
+                print("🔄 Tentando com Chromium...")
+                # Fallback para Chromium
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    user_data_dir=self.user_data_dir,
+                    headless=self.headless,
+                    channel=None,  # Usa Chromium do Playwright
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    locale='pt-BR',
+                    timezone_id='America/Sao_Paulo',
+                    geolocation={'latitude': -23.5505, 'longitude': -46.6333},
+                    permissions=['geolocation'],
+                    color_scheme='light',
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-infobars',
+                        '--disable-extensions',
+                        '--disable-gpu',
+                        '--window-size=1920,1080',
+                        '--start-maximized',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--enable-features=NetworkService,NetworkServiceInProcess',
+                    ],
+                    ignore_default_args=['--enable-automation'],
+                )
+                print("✅ Browser inicializado: Chromium (fallback)")
+            else:
+                raise
         
         self.page = await self.context.new_page()
         
@@ -220,8 +248,6 @@ class ScraperMLAfiliado:
                 };
             }
         """)
-        
-        print("✅ Browser inicializado com anti-detecção avançada")
     
     async def _close_browser(self):
         """Fecha o browser mantendo os dados"""
@@ -232,7 +258,6 @@ class ScraperMLAfiliado:
     
     async def _human_delay(self, min_ms: int = 500, max_ms: int = 1500):
         """Delay humanizado para evitar detecção"""
-        import random
         delay = random.randint(min_ms, max_ms)
         await asyncio.sleep(delay / 1000)
     
@@ -253,24 +278,40 @@ class ScraperMLAfiliado:
     async def verificar_login(self) -> bool:
         """Verifica se está logado como afiliado"""
         try:
-            await self.page.goto(self.URL_OFERTAS, wait_until='networkidle', timeout=30000)
+            await self.page.goto(self.URL_OFERTAS, wait_until='domcontentloaded', timeout=30000)
             await self._human_delay(1000, 2000)
             
-            # Procura elementos que só aparecem quando logado como afiliado
-            # Baseado na imagem 2: "Afiliados | Métricas | Configurações"
+            # MÉTODO 1: Verifica pelo XPath específico do menu do usuário
+            try:
+                user_menu_xpath = await self.page.query_selector(
+                    "xpath=//*[@id='nav-header-menu']/ul/li[1]/div/label/a"
+                )
+                if user_menu_xpath:
+                    print("✅ Login detectado (XPath nav-header-menu)")
+                    return True
+            except:
+                pass
+            
+            # MÉTODO 2: Verifica pelo link da conta do usuário
+            user_account_link = await self.page.query_selector(
+                "a.nav-header-user-myml[href*='myaccount.mercadolivre.com.br']"
+            )
+            if user_account_link:
+                print("✅ Login detectado (nav-header-user-myml)")
+                return True
+            
+            # MÉTODO 3: Verifica elementos de afiliado
             afiliado_element = await self.page.query_selector(
                 "[class*='affiliate'], [class*='nav-affiliate'], :text('Afiliados'), :text('GANHOS')"
             )
-            
             if afiliado_element:
                 print("✅ Login de afiliado detectado!")
                 return True
             
-            # Verifica se tem o nome do usuário no header
+            # MÉTODO 4: Verifica qualquer elemento do header do usuário
             user_element = await self.page.query_selector(
-                "[class*='user-name'], [class*='nav-header-user'], :text('Eduardo')"
+                "[class*='nav-header-user'], .nav-header-username"
             )
-            
             if user_element:
                 print("✅ Usuário logado detectado!")
                 return True
@@ -474,7 +515,6 @@ class ScraperMLAfiliado:
             produto["status"] = "erro"
             produto["erro"] = str(e)
             print(f"     ❌ Erro na extração: {e}")
-            import traceback
             print(f"     📋 Stack trace: {traceback.format_exc()}")
         
         return produto
@@ -488,112 +528,120 @@ class ScraperMLAfiliado:
         """
         try:
             print("     🔍 Procurando botão Compartilhar...")
-
             btn_compartilhar = None
             
-            # MÉTODO 1: XPath específico (mais rápido e confiável se estrutura não mudou)
+            # MÉTODO 1: XPath específico do botão
             try:
                 btn_compartilhar = await self.page.wait_for_selector(
                     "xpath=/html/body/div[1]/nav/div/div[3]/div[2]/div/button",
                     timeout=5000
                 )
                 if btn_compartilhar:
-                    print("     ✅ Botão encontrado via XPath!")
+                    print("     ✅ Botão encontrado via XPath específico!")
             except:
-                print("     ⚠️ XPath falhou, tentando fallback...")
+                pass
 
-            # MÉTODO 2: Busca no header/nav da página (fallback confiável)
+            # MÉTODO 2: data-testid (fallback confiável)
             if not btn_compartilhar:
                 try:
                     btn_compartilhar = await self.page.wait_for_selector(
-                        "nav button:has-text('Compartilhar'), header button:has-text('Compartilhar')",
+                        "button[data-testid='generate_link_button']",
                         timeout=5000
                     )
                     if btn_compartilhar:
-                        print("     ✅ Botão encontrado no header/nav!")
+                        print("     ✅ Botão encontrado via data-testid!")
                 except:
                     pass
 
-            # MÉTODO 3: Busca em qualquer lugar (último recurso)
+            # MÉTODO 3: Busca no nav (último recurso)
             if not btn_compartilhar:
                 try:
                     btn_compartilhar = await self.page.wait_for_selector(
-                        "button:has-text('Compartilhar')",
+                        "nav button:has-text('Compartilhar')",
                         timeout=3000
                     )
                     if btn_compartilhar:
-                        print("     ✅ Botão encontrado na página!")
+                        print("     ✅ Botão encontrado no nav!")
                 except:
                     pass
 
             if not btn_compartilhar:
-                print("     ⚠️ Botão Compartilhar não encontrado em nenhum método")
+                print("     ❌ Botão Compartilhar não encontrado")
                 return None
             
             # Clica no botão
             await btn_compartilhar.click()
+            print("     ⏳ Aguardando modal abrir...")
             await self._human_delay(1000, 2000)
 
-            # Aguarda o modal aparecer - usando múltiplos seletores
-            await self.page.wait_for_selector(
-                "input[value*='mercadolivre.com/sec'], input[value*='meli.to'], div:has-text('Link do produto')",
-                timeout=5000
-            )
+            # Aguarda o modal aparecer - XPath específico
+            try:
+                await self.page.wait_for_selector(
+                    "xpath=/html/body/div[1]/nav/div/div[3]/div[2]/div[2]/div",
+                    timeout=5000
+                )
+                print("     ✅ Modal detectado!")
+            except:
+                print("     ⚠️ Modal não detectado pelo XPath, tentando seletor genérico...")
+                await self.page.wait_for_selector(
+                    "div:has-text('Link do produto'), input[value*='mercadolivre.com/sec']",
+                    timeout=5000
+                )
 
-            await self._human_delay(500, 1000)
+            await self._human_delay(800, 1500)
 
-            # MÉTODO 1: Tenta extrair usando o XPath específico do modal
             resultado = {}
 
+            # MÉTODO PRINCIPAL: Procura o container do link e clica no botão copiar
             try:
-                # Usa o XPath fornecido como base para encontrar o input
-                xpath_base = "/html/body/div[1]/nav/div/div[3]/div[2]/div[2]/div/div/div/div/div[2]/div/div/div/div[2]/div/div"
-                elemento_xpath = await self.page.query_selector(f"xpath={xpath_base}")
-
-                if elemento_xpath:
-                    # Procura input dentro desse elemento
-                    input_link = await elemento_xpath.query_selector("input[type='text'], input[readonly]")
-                    if input_link:
-                        url_curta = await input_link.get_attribute("value")
-                        if url_curta and ("mercadolivre.com/sec/" in url_curta or "meli.to/" in url_curta):
-                            resultado["url_curta"] = url_curta.strip()
-                            print(f"     ✅ Link extraído via XPath: {url_curta[:50]}...")
-            except Exception as e:
-                print(f"     ⚠️ XPath não funcionou: {e}")
-
-            # MÉTODO 2: Busca todos os inputs visíveis com link
-            if not resultado.get("url_curta"):
-                try:
-                    inputs = await self.page.query_selector_all("input[type='text'], input[readonly]")
-                    for input_elem in inputs:
-                        value = await input_elem.get_attribute("value") or ""
-                        if "mercadolivre.com/sec/" in value or "meli.to/" in value:
-                            resultado["url_curta"] = value.strip()
-                            print(f"     ✅ Link extraído via input: {value[:50]}...")
-                            break
-                except Exception as e:
-                    print(f"     ⚠️ Busca por inputs falhou: {e}")
-
-            # MÉTODO 3: Tenta copiar clicando no botão de copiar
-            if not resultado.get("url_curta"):
-                try:
-                    # Procura botão de copiar
-                    btn_copiar = await self.page.query_selector(
-                        "button:has-text('Copiar'), button[aria-label*='Copiar'], [class*='copy'] button"
+                # Procura o container específico do link
+                link_container = await self.page.query_selector(
+                    "xpath=//*[@id='P0-2']/div/div/div/div[2]/div/div/div/div[2]/div"
+                )
+                
+                if not link_container:
+                    # Fallback: procura qualquer container com o link
+                    print("     ⚠️ Container XPath não encontrado, usando fallback...")
+                    link_container = await self.page.query_selector(
+                        "div:has(input[value*='mercadolivre.com/sec']), div:has(input[value*='meli.to'])"
                     )
-
+                
+                if link_container:
+                    print("     ✅ Container do link encontrado!")
+                    
+                    # Procura o botão de copiar - XPath específico primeiro
+                    btn_copiar = None
+                    try:
+                        btn_copiar = await self.page.query_selector(
+                            "xpath=/html/body/div[1]/nav/div/div[3]/div[2]/div[2]/div/div/div/div/div[2]/div/div/div/div[2]/div/div/div/button"
+                        )
+                        if btn_copiar:
+                            print("     ✅ Botão copiar encontrado via XPath!")
+                    except:
+                        pass
+                    
+                    # Fallback: procura botão genérico
+                    if not btn_copiar:
+                        btn_copiar = await link_container.query_selector(
+                            "button:has-text('Copiar'), button[aria-label*='Copiar']"
+                        )
+                        if btn_copiar:
+                            print("     ✅ Botão copiar encontrado via fallback!")
+                    
                     if btn_copiar:
                         # Clica para copiar
                         await btn_copiar.click()
-                        await self._human_delay(300, 600)
+                        print("     ⏳ Link copiado, lendo clipboard...")
+                        await self._human_delay(500, 1000)
 
-                        # Tenta ler do clipboard via JS
+                        # Lê do clipboard
                         clipboard_text = await self.page.evaluate("""
                             async () => {
                                 try {
                                     const text = await navigator.clipboard.readText();
                                     return text;
-                                } catch {
+                                } catch (err) {
+                                    console.error('Erro ao ler clipboard:', err);
                                     return null;
                                 }
                             }
@@ -601,70 +649,61 @@ class ScraperMLAfiliado:
 
                         if clipboard_text and ("mercadolivre.com/sec/" in clipboard_text or "meli.to/" in clipboard_text):
                             resultado["url_curta"] = clipboard_text.strip()
-                            print(f"     ✅ Link copiado do clipboard: {clipboard_text[:50]}...")
-                except Exception as e:
-                    print(f"     ⚠️ Método clipboard falhou: {e}")
+                            print(f"     ✅ Link extraído do clipboard: {clipboard_text[:50]}...")
+                        else:
+                            print(f"     ⚠️ Clipboard vazio ou sem link válido: {clipboard_text}")
+                    else:
+                        print("     ⚠️ Botão copiar não encontrado")
+                else:
+                    print("     ⚠️ Container do link não encontrado")
+            
+            except Exception as e:
+                print(f"     ⚠️ Erro no método principal: {e}")
 
-            # MÉTODO 4: Busca via JavaScript (fallback)
+            # FALLBACK: Busca direta no input se o método principal falhar
             if not resultado.get("url_curta"):
+                print("     ⚠️ Tentando fallback: busca direta no input...")
                 try:
-                    js_resultado = await self.page.evaluate("""
-                        () => {
-                            // Procura em todos os elementos de texto
-                            const allElements = document.querySelectorAll('*');
-                            for (const el of allElements) {
-                                const text = el.textContent || el.innerText || el.value || '';
-                                if (text.includes('mercadolivre.com/sec/') || text.includes('meli.to/')) {
-                                    // Extrai URL
-                                    const match = text.match(/(https?:\\/\\/[\\w.-]+\\/sec\\/[\\w-]+)|(https?:\\/\\/meli\\.to\\/[\\w-]+)/);
-                                    if (match) {
-                                        return match[0];
-                                    }
-                                }
-                            }
-                            return null;
-                        }
-                    """)
-
-                    if js_resultado:
-                        resultado["url_curta"] = js_resultado.strip()
-                        print(f"     ✅ Link extraído via JS: {js_resultado[:50]}...")
+                    inputs = await self.page.query_selector_all("input[type='text'], input[readonly]")
+                    for input_elem in inputs:
+                        value = await input_elem.get_attribute("value") or ""
+                        if "mercadolivre.com/sec/" in value or "meli.to/" in value:
+                            resultado["url_curta"] = value.strip()
+                            print(f"     ✅ Link extraído via input fallback: {value[:50]}...")
+                            break
                 except Exception as e:
-                    print(f"     ⚠️ Busca via JS falhou: {e}")
+                    print(f"     ⚠️ Fallback falhou: {e}")
 
             # Extrai ID do produto se possível
-            try:
-                id_inputs = await self.page.query_selector_all("input[value*='-']")
-                for input_elem in id_inputs:
-                    value = await input_elem.get_attribute("value") or ""
-                    if re.match(r'^[A-Z0-9]{6,}-[A-Z0-9]{4,}$', value):
-                        resultado["product_id"] = value
-                        break
-            except:
-                pass
+            if not resultado.get("product_id"):
+                try:
+                    id_inputs = await self.page.query_selector_all("input[value*='-']")
+                    for input_elem in id_inputs:
+                        value = await input_elem.get_attribute("value") or ""
+                        if re.match(r'^[A-Z0-9]{6,}-[A-Z0-9]{4,}$', value):
+                            resultado["product_id"] = value
+                            print(f"     ✅ Product ID extraído: {value}")
+                            break
+                except:
+                    pass
 
             # Fecha o modal
             try:
-                close_btn = await self.page.query_selector(
-                    "[class*='close'], button[aria-label='Fechar'], [class*='modal'] button, button:has-text('Fechar')"
-                )
-                if close_btn:
-                    await close_btn.click()
-                else:
-                    await self.page.keyboard.press('Escape')
-            except:
                 await self.page.keyboard.press('Escape')
-
-            await self._human_delay(300, 600)
+                await self._human_delay(300, 600)
+                print("     ✅ Modal fechado")
+            except:
+                pass
 
             if resultado.get("url_curta"):
                 return resultado
 
-            print("     ⚠️ Nenhum método conseguiu extrair o link")
+            print("     ❌ Não foi possível extrair o link de afiliado")
             return None
             
         except Exception as e:
-            print(f"     ⚠️ Erro ao extrair link: {e}")
+            print(f"     ❌ Erro ao extrair link: {e}")
+            print(f"     📋 Stack trace: {traceback.format_exc()}")
             # Tenta fechar modal se abriu
             try:
                 await self.page.keyboard.press('Escape')
@@ -772,8 +811,7 @@ async def main():
     async with ScraperMLAfiliado(
         headless=False,
         wait_ms=1500,
-        max_produtos=50,
-        etiqueta="egnofertas"
+        max_produtos=50
     ) as scraper:
         
         # Executa scraping

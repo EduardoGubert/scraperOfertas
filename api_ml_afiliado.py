@@ -43,6 +43,27 @@ METADATA_FILE = os.path.join(BROWSER_DATA_DIR, "login_metadata.json")
 scraper_instance: Optional[ScraperMLAfiliado] = None
 
 
+def get_proxy_config() -> Optional[dict]:
+    """Le configuracao de proxy das variaveis de ambiente"""
+    proxy_server = os.getenv('PROXY_SERVER')
+    
+    if not proxy_server:
+        return None
+    
+    proxy_config = {'server': proxy_server}
+    
+    proxy_user = os.getenv('PROXY_USER')
+    proxy_pass = os.getenv('PROXY_PASS')
+    
+    if proxy_user:
+        proxy_config['username'] = proxy_user
+    if proxy_pass:
+        proxy_config['password'] = proxy_pass
+    
+    print(f"🌐 Proxy configurado: {proxy_server}")
+    return proxy_config
+
+
 async def verify_api_key(api_key: str = Security(API_KEY_HEADER)):
     """Verifica API Key"""
     if api_key is None:
@@ -290,7 +311,9 @@ async def auth_check(api_key: str = Depends(verify_api_key)):
             headless=True,
             wait_ms=1500,
             max_produtos=1,
-            user_data_dir=BROWSER_DATA_DIR
+            user_data_dir=BROWSER_DATA_DIR,
+            proxy=get_proxy_config(),
+            use_chrome=True  # Tenta usar Chrome real (auto-detecta se disponível)
         )
         await scraper_instance._init_browser()
 
@@ -373,7 +396,9 @@ async def scrape_ofertas(request: ScrapeRequest, api_key: str = Depends(verify_a
             headless=request.headless,
             wait_ms=1500,
             max_produtos=request.max_produtos,
-            user_data_dir=BROWSER_DATA_DIR
+            user_data_dir=BROWSER_DATA_DIR,
+            proxy=get_proxy_config(),
+            use_chrome=True  # Tenta usar Chrome real (auto-detecta se disponível)
         )
         await scraper_instance._init_browser()
 

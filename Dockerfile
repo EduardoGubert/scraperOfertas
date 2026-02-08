@@ -40,6 +40,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Instala Playwright e browsers
+# Instala Chrome REAL (menos detectável que Chromium) + Chromium como fallback
+RUN playwright install chrome
+RUN playwright install-deps chrome
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
@@ -60,5 +63,5 @@ EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:99
 
-# Comando de inicialização
-CMD ["uvicorn", "api_ml_afiliado:app", "--host", "0.0.0.0", "--port", "8000"]
+# Comando de inicialização - Inicia Xvfb primeiro para ter display virtual real
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp & sleep 2 && uvicorn api_ml_afiliado:app --host 0.0.0.0 --port 8000"]

@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # ========================================
+  # PostgreSQL
+  # ========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: egn_postgres_local
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: egn_ofertas
+      POSTGRES_USER: egn_user
+      POSTGRES_PASSWORD: egn_password_2025
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - egn_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U egn_user -d egn_ofertas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================================
+  # n8n
+  # ========================================
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: egn_n8n_local
+    restart: unless-stopped
+    environment:
+      # Database
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: egn_ofertas
+      DB_POSTGRESDB_USER: egn_user
+      DB_POSTGRESDB_PASSWORD: egn_password_2025
+      
+      # n8n Config
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: admin
+      N8N_BASIC_AUTH_PASSWORD: egn2025admin
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:5678/
+      
+      # Timezone
+      GENERIC_TIMEZONE: America/Sao_Paulo
+      TZ: America/Sao_Paulo
+      
+      # Executions
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: true
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - egn_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================
+  # Scraper ML Afiliado
+  # ========================================
+  scraper-ml-afiliado:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: egn_scraper_local
+    restart: unless-stopped
+    environment:
+      # Proxy (opcional)
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USER: ${PROXY_USER:-}
+      PROXY_PASS: ${PROXY_PASS:-}
+      
+      # Display para Xvfb
+      DISPLAY: ":99"
+      
+      # Timezone
+      TZ: America/Sao_Paulo
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persiste cookies e browser data
+      - scraper_browser_data:/app/ml_browser_data
+      # Para debug (screenshots) - CORRIGIDO caminho
+      - ./debug_screenshots:/app/debug_screenshots
+    networks:
+      - egn_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+  scraper_browser_data:
+    driver: local
+
+networks:
+  egn_network:
+    driver: bridge

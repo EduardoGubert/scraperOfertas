@@ -339,6 +339,60 @@ class ScraperMLAfiliado:
         await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
         print(f"   ✅ Página de ofertas carregada")
         
+        # ===================================
+        # CLICA EM OFERTAS RELÂMPAGO
+        # ===================================
+        try:
+            print(f"   🔍 Procurando por 'Ofertas relâmpago'...")
+            
+            # Aguarda um pouco para a página carregar completamente
+            await self._human_delay(2000, 3000)
+            
+            # Tenta encontrar e clicar em "Ofertas relâmpago" usando o XPath fornecido
+            ofertas_relampago_clicked = await self.page.evaluate("""
+                () => {
+                    // XPath específico fornecido pelo usuário
+                    const xpath = '/html/body/main/div/div/div/section/div/section/div[2]/div/div/div[2]/div';
+                    const xpathResult = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                    
+                    if (xpathResult.singleNodeValue) {
+                        xpathResult.singleNodeValue.click();
+                        return 'xpath_success';
+                    }
+                    
+                    // Fallback: procura por texto "Ofertas relâmpago" ou "relâmpago"
+                    const elements = Array.from(document.querySelectorAll('*')).filter(el => {
+                        const text = el.textContent || el.innerText || '';
+                        return text.toLowerCase().includes('relâmpago') || text.toLowerCase().includes('relámpago');
+                    });
+                    
+                    if (elements.length > 0) {
+                        // Pega o primeiro elemento clicável
+                        for (const el of elements) {
+                            if (el.click && el.offsetParent !== null) {
+                                el.click();
+                                return 'text_success';
+                            }
+                        }
+                    }
+                    
+                    return 'not_found';
+                }
+            """)
+            
+            if ofertas_relampago_clicked == 'xpath_success':
+                print(f"   ✅ Ofertas relâmpago encontradas via XPath - clicando...")
+                await self._human_delay(3000, 4000)  # Aguarda navegação
+            elif ofertas_relampago_clicked == 'text_success':
+                print(f"   ✅ Ofertas relâmpago encontradas via texto - clicando...")
+                await self._human_delay(3000, 4000)  # Aguarda navegação
+            else:
+                print(f"   ⚠️ Ofertas relâmpago não encontradas, continuando com ofertas normais...")
+                
+        except Exception as e:
+            print(f"   ⚠️ Erro ao procurar ofertas relâmpago: {e}")
+            print(f"   🔄 Continuando com ofertas normais...")
+        
         await self._human_delay(1500, 2500)
         
         # Scroll para carregar mais produtos

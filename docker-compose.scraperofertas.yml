@@ -2,15 +2,15 @@ version: '3.8'
 
 services:
   scraper-ml-afiliado:
-    image: eduardogubert/scraper-ml-afiliado:latest
+    image: ghcr.io/eduardogubert/scraper-ml-afiliado:latest
     networks:
       - network_public
+      - network_private
     environment:
       - PYTHONUNBUFFERED=1
       - DISPLAY=:99
       - SCRAPER_API_KEY=${SCRAPER_API_KEY:-egn-2025-secret-key}
     volumes:
-      # Cookies do browser - sincronizados via sync_to_vps.ps1
       - /root/scraperOfertas/ml_browser_data:/app/ml_browser_data
     deploy:
       mode: replicated
@@ -19,8 +19,7 @@ services:
         - "traefik.enable=true"
         - "traefik.http.routers.scraper-ml-afiliado.rule=Host(`scraperofertas.soluztions.shop`)"
         - "traefik.http.routers.scraper-ml-afiliado.entrypoints=websecure"
-        - "traefik.http.routers.scraper-ml-afiliado.tls=true"
-        - "traefik.http.routers.scraper-ml-afiliado.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.scraper-ml-afiliado.tls.certresolver=letsencryptresolver"
         - "traefik.http.services.scraper-ml-afiliado.loadbalancer.server.port=8000"
       resources:
         limits:
@@ -34,4 +33,6 @@ services:
 
 networks:
   network_public:
+    external: true
+  network_private:
     external: true

@@ -1,4 +1,4 @@
-version: '3.8'
+﻿version: '3.8'
 
 services:
   scraper-ml-afiliado:
@@ -10,8 +10,24 @@ services:
       - PYTHONUNBUFFERED=1
       - DISPLAY=:99
       - SCRAPER_API_KEY=${SCRAPER_API_KEY:-egn-2025-secret-key}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - CACHE_BACKEND=${CACHE_BACKEND:-redis}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-86400}
+      - REDIS_HOST=${REDIS_HOST:-127.0.0.1}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-2}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_SSL=${REDIS_SSL:-false}
+      - SCHEDULER_INTERVAL_MINUTES=${SCHEDULER_INTERVAL_MINUTES:-30}
+      - SCHEDULER_MAX_PRODUTOS=${SCHEDULER_MAX_PRODUTOS:-30}
+      - SCHEDULER_JOB_TIMEOUT_SECONDS=${SCHEDULER_JOB_TIMEOUT_SECONDS:-30}
     volumes:
       - /root/scraperOfertas/ml_browser_data:/app/ml_browser_data
+      - /root/scraperOfertas/logs:/app/logs
     deploy:
       mode: replicated
       replicas: 1

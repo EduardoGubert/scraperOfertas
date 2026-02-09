@@ -1,23 +1,28 @@
-# Scraper ML Afiliado - Dependências
+﻿# scraperOfertas dependencies
 # pip install -r requirements.txt
 
-# Playwright para browser automation
+# Browser automation
 playwright>=1.40.0
 
-# FastAPI para API REST
+# API
 fastapi>=0.109.0
 uvicorn[standard]>=0.25.0
 
-# Banco de Dados PostgreSQL
+# PostgreSQL
 asyncpg>=0.29.0
 psycopg2-binary>=2.9.5
+SQLAlchemy>=2.0.0
+alembic>=1.13.0
 
-# Utilitários
+# Config and utilities
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
+redis>=5.0.0
+tzdata>=2024.1
 
-# Para gerar executável
+# Tests
+pytest>=8.0.0
+
+# Executable build
 pyinstaller>=5.0.0
-
-# Após instalar, executar:
-# playwright install chromium

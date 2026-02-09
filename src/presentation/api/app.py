@@ -140,7 +140,7 @@ async def auth_status(api_key: str = Depends(verify_api_key)):
             cookies_exist=False,
             cookies_valid=False,
             message="Cookies nao encontrados. Login necessario.",
-            action_required="Execute localmente: python login_local.py && ./sync_to_vps.ps1",
+            action_required="Execute localmente: python -m apps.scraper.login_local && scripts/windows/sync_to_vps.ps1",
         )
 
     if not cookies_info.get("metadata_exist"):
@@ -161,7 +161,7 @@ async def auth_status(api_key: str = Depends(verify_api_key)):
             days_since_login=cookies_info.get("days_since_login"),
             days_until_expiry=days_until_expiry,
             message="Cookies expirados",
-            action_required="Execute localmente: python login_local.py && ./sync_to_vps.ps1",
+            action_required="Execute localmente: python -m apps.scraper.login_local && scripts/windows/sync_to_vps.ps1",
         )
 
     return AuthStatusResponse(
@@ -191,7 +191,7 @@ async def auth_check(api_key: str = Depends(verify_api_key)):
             content={
                 "logged_in": False,
                 "message": "Nao esta logado como afiliado",
-                "action_required": "Execute localmente: python login_local.py && ./sync_to_vps.ps1",
+                "action_required": "Execute localmente: python -m apps.scraper.login_local && scripts/windows/sync_to_vps.ps1",
                 "checked_at": datetime.now().isoformat(),
             },
         )
@@ -218,7 +218,7 @@ async def _run_single_scraper(scraper_type: str, request: ScrapeRequest) -> Scra
                     status_code=401,
                     detail={
                         "error": "Nao esta logado como afiliado",
-                        "action": "Execute localmente: python login_local.py && ./sync_to_vps.ps1",
+                        "action": "Execute localmente: python -m apps.scraper.login_local && scripts/windows/sync_to_vps.ps1",
                     },
                 )
             start_url = request.url if scraper_type in {"ofertas", "ofertas_relampago"} else None
@@ -278,3 +278,4 @@ async def scrape_todos(request: ScrapeRequest, api_key: str = Depends(verify_api
             "cupons": results.cupons.__dict__,
         },
     }
+

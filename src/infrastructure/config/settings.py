@@ -8,7 +8,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parents[3]
+ENV_PRIMARY = BASE_DIR / "config" / "env" / ".env"
+ENV_FALLBACK = BASE_DIR / ".env"
+
+if ENV_PRIMARY.exists():
+    load_dotenv(ENV_PRIMARY)
+if ENV_FALLBACK.exists():
+    load_dotenv(ENV_FALLBACK, override=False)
 
 
 def _as_bool(value: str | None, default: bool) -> bool:

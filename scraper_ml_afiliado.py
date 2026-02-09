@@ -13,10 +13,229 @@ import asyncio
 import json
 import os
 import re
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set, Dict, Any
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+
+
+class CacheManager:
+    """Gerenciador de cache persistente para produtos já processados"""
+    
+    def __init__(self, cache_file: str = "cache_produtos.json"):
+        self.cache_file = cache_file
+        self.cache_data = {
+            "produtos": {},  # chave_id -> dados_produto
+            "urls": {},      # url_hash -> chave_id
+            "mlb_ids": {},   # mlb_id -> chave_id
+            "metadados": {
+                "versao": "1.0",
+                "criado_em": datetime.now().isoformat(),
+                "total_produtos": 0
+            }
+        }
+        self.modificado = False
+        self._carregar_cache()
+    
+    def _carregar_cache(self):
+        """Carrega cache do arquivo JSON"""
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # Valida estrutura
+                    if isinstance(data, dict) and "produtos" in data:
+                        self.cache_data = data
+                        total = len(self.cache_data["produtos"])
+                        print(f"📋 Cache carregado: {total} produtos")
+                    else:
+                        print("⚠️ Cache inválido, criando novo")
+            except Exception as e:
+                print(f"⚠️ Erro ao carregar cache: {e}, criando novo")
+    
+    def salvar_cache(self, force: bool = False):
+        """Salva cache no arquivo JSON"""
+        if self.modificado or force:
+            try:
+                self.cache_data["metadados"]["total_produtos"] = len(self.cache_data["produtos"])
+                self.cache_data["metadados"]["atualizado_em"] = datetime.now().isoformat()
+                
+                with open(self.cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.cache_data, f, ensure_ascii=False, indent=2)
+                
+                self.modificado = False
+                print(f"💾 Cache salvo: {len(self.cache_data['produtos'])} produtos")
+            except Exception as e:
+                print(f"❌ Erro ao salvar cache: {e}")
+    
+    def _gerar_chave_produto(self, url: str, mlb_id: str = None) -> str:
+        """Gera chave única para produto"""
+        if mlb_id:
+            return f"mlb:{mlb_id}"
+        # Fallback: hash da URL normalizada
+        url_limpa = re.sub(r'[?#].*', '', url)  # Remove parâmetros
+        url_hash = hashlib.md5(url_limpa.encode()).hexdigest()[:12]
+        return f"url:{url_hash}"
+    
+    def _normalizar_url(self, url: str) -> str:
+        """Normaliza URL removendo parâmetros de tracking"""
+        return re.sub(r'[?#].*', '', url).strip().rstrip('/')
+    
+    def _extrair_mlb_id(self, url: str) -> Optional[str]:
+        """Extrai MLB ID da URL"""
+        match = re.search(r'MLB[-]?(\d+)', url)
+        if match:
+            return f"MLB{match.group(1)}"
+        return None
+    
+    def produto_existe(self, url: str) -> bool:
+        """Verifica se produto já foi processado"""
+        mlb_id = self._extrair_mlb_id(url)
+        chave = self._gerar_chave_produto(url, mlb_id)
+        
+        # Verifica por MLB ID primeiro (mais confiável)
+        if mlb_id and mlb_id in self.cache_data["mlb_ids"]:
+            return True
+        
+        # Verifica por hash da URL    
+        url_limpa = self._normalizar_url(url)
+        url_hash = hashlib.md5(url_limpa.encode()).hexdigest()[:12]
+        if f"url:{url_hash}" in self.cache_data["urls"]:
+            return True
+        
+        return False
+    
+    def obter_produto(self, url: str) -> Optional[Dict[str, Any]]:
+        """Obtém dados do produto do cache"""
+        mlb_id = self._extrair_mlb_id(url)
+        
+        # Busca por MLB ID primeiro
+        if mlb_id and mlb_id in self.cache_data["mlb_ids"]:
+            chave_produto = self.cache_data["mlb_ids"][mlb_id]
+            return self.cache_data["produtos"].get(chave_produto)
+        
+        # Busca por URL hash
+        url_limpa = self._normalizar_url(url)
+        url_hash = hashlib.md5(url_limpa.encode()).hexdigest()[:12]
+        chave_url = f"url:{url_hash}"
+        
+        if chave_url in self.cache_data["urls"]:
+            chave_produto = self.cache_data["urls"][chave_url]
+            return self.cache_data["produtos"].get(chave_produto)
+        
+        return None
+    
+    def adicionar_produto(self, produto: Dict[str, Any]):
+        """Adiciona produto ao cache"""
+        if not produto.get("url_original"):
+            return
+        
+        url = produto["url_original"]
+        mlb_id = produto.get("mlb_id") or self._extrair_mlb_id(url)
+        
+        chave_produto = self._gerar_chave_produto(url, mlb_id)
+        
+        # Adiciona produto
+        produto["cache_adicionado_em"] = datetime.now().isoformat()
+        self.cache_data["produtos"][chave_produto] = produto
+        
+        # Indexa por MLB ID
+        if mlb_id:
+            self.cache_data["mlb_ids"][mlb_id] = chave_produto
+        
+        # Indexa por URL hash
+        url_limpa = self._normalizar_url(url)
+        url_hash = hashlib.md5(url_limpa.encode()).hexdigest()[:12]
+        self.cache_data["urls"][f"url:{url_hash}"] = chave_produto
+        
+        self.modificado = True
+    
+    def limpar_cache_antigo(self, dias: int = 30):
+        """Remove produtos mais antigos que X dias"""
+        data_limite = datetime.now() - timedelta(days=dias)
+        produtos_removidos = 0
+        
+        produtos_para_manter = {}
+        mlb_ids_para_manter = {}
+        urls_para_manter = {}
+        
+        for chave, produto in self.cache_data["produtos"].items():
+            data_str = produto.get("cache_adicionado_em")
+            if data_str:
+                try:
+                    data_produto = datetime.fromisoformat(data_str)
+                    if data_produto >= data_limite:
+                        # Mantém produto
+                        produtos_para_manter[chave] = produto
+                        
+                        # Reconstrói índices
+                        mlb_id = produto.get("mlb_id")
+                        if mlb_id:
+                            mlb_ids_para_manter[mlb_id] = chave
+                        
+                        url = produto.get("url_original")
+                        if url:
+                            url_limpa = self._normalizar_url(url)
+                            url_hash = hashlib.md5(url_limpa.encode()).hexdigest()[:12]
+                            urls_para_manter[f"url:{url_hash}"] = chave
+                    else:
+                        produtos_removidos += 1
+                except:
+                    # Mantém produtos com data inválida
+                    produtos_para_manter[chave] = produto
+            else:
+                # Mantém produtos sem data
+                produtos_para_manter[chave] = produto
+        
+        if produtos_removidos > 0:
+            self.cache_data["produtos"] = produtos_para_manter
+            self.cache_data["mlb_ids"] = mlb_ids_para_manter
+            self.cache_data["urls"] = urls_para_manter
+            self.modificado = True
+            print(f"🧹 Cache limpo: {produtos_removidos} produtos antigos removidos")
+    
+    def limpar_cache_completo(self):
+        """Remove todo o cache"""
+        total_removidos = len(self.cache_data["produtos"])
+        self.cache_data = {
+            "produtos": {},
+            "urls": {},
+            "mlb_ids": {},
+            "metadados": {
+                "versao": "1.0",
+                "criado_em": datetime.now().isoformat(),
+                "total_produtos": 0
+            }
+        }
+        self.modificado = True
+        print(f"🗑️ Cache completamente limpo: {total_removidos} produtos removidos")
+    
+    def estatisticas(self) -> Dict[str, Any]:
+        """Retorna estatísticas do cache"""
+        produtos = self.cache_data["produtos"]
+        total = len(produtos)
+        
+        status_count = {"sucesso": 0, "erro": 0, "sem_link": 0, "outros": 0}
+        com_link_afiliado = 0
+        
+        for produto in produtos.values():
+            status = produto.get("status", "outros")
+            if status in status_count:
+                status_count[status] += 1
+            else:
+                status_count["outros"] += 1
+            
+            if produto.get("url_curta"):
+                com_link_afiliado += 1
+        
+        return {
+            "total_produtos": total,
+            "com_link_afiliado": com_link_afiliado,
+            "status": status_count,
+            "arquivo": self.cache_file,
+            "tamanho_arquivo_kb": round(os.path.getsize(self.cache_file) / 1024, 2) if os.path.exists(self.cache_file) else 0
+        }
 
 
 class ScraperMLAfiliado:
@@ -64,7 +283,9 @@ class ScraperMLAfiliado:
         wait_ms: int = 1500,
         max_produtos: int = 50,
         etiqueta: str = "egnofertas",
-        user_data_dir: Optional[str] = None  # Permite customizar caminho dos cookies
+        user_data_dir: Optional[str] = None,  # Permite customizar caminho dos cookies
+        cache_file: str = "cache_produtos.json",  # Arquivo de cache
+        usar_cache: bool = True  # Habilita/desabilita cache
     ):
         self.headless = headless
         self.wait_ms = wait_ms
@@ -73,6 +294,12 @@ class ScraperMLAfiliado:
         # Se user_data_dir for fornecido, usa ele; caso contrário usa o padrão
         self.user_data_dir = user_data_dir or self.USER_DATA_DIR
         
+        # Sistema de cache
+        self.usar_cache = usar_cache
+        self.cache_manager = CacheManager(cache_file) if usar_cache else None
+        self.produtos_processados_sessao: Set[str] = set()  # Cache de sessão
+        self.contador_produtos_processados = 0
+        
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -80,9 +307,15 @@ class ScraperMLAfiliado:
         
     async def __aenter__(self):
         await self._init_browser()
+        # Limpa cache antigo automaticamente
+        if self.cache_manager:
+            self.cache_manager.limpar_cache_antigo(30)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Salva cache ao finalizar
+        if self.cache_manager:
+            self.cache_manager.salvar_cache(force=True)
         await self._close_browser()
     
     async def _init_browser(self):
@@ -321,6 +554,78 @@ class ScraperMLAfiliado:
             return False
     
     # =========================================
+    # MÉTODOS DE CACHE
+    # =========================================
+    
+    def _extrair_mlb_id_url(self, url: str) -> Optional[str]:
+        """Extrai MLB ID da URL"""
+        match = re.search(r'MLB[-]?(\d+)', url)
+        if match:
+            return f"MLB{match.group(1)}"
+        return None
+    
+    def _filtrar_links_cache(self, links: list[str]) -> list[str]:
+        """Filtra links removendo produtos já processados"""
+        if not self.usar_cache or not self.cache_manager:
+            return links
+        
+        links_novos = []
+        total_original = len(links)
+        
+        for link in links:
+            # Verifica cache persistente
+            if self.cache_manager.produto_existe(link):
+                continue
+                
+            # Verifica cache de sessão
+            mlb_id = self._extrair_mlb_id_url(link)
+            if mlb_id and mlb_id in self.produtos_processados_sessao:
+                continue
+            
+            # Link não foi processado
+            links_novos.append(link)
+        
+        # Estatisticas
+        em_cache = total_original - len(links_novos)
+        if em_cache > 0:
+            print(f"📋 Cache: {em_cache} produtos já processados, {len(links_novos)} novos")
+        else:
+            print(f"🆕 Todos os {len(links_novos)} produtos são novos")
+            
+        return links_novos
+    
+    def _adicionar_produto_cache(self, produto: Dict[str, Any]):
+        """Adiciona produto ao cache após processamento"""
+        if not self.usar_cache or not self.cache_manager:
+            return
+            
+        # Adiciona ao cache persistente
+        self.cache_manager.adicionar_produto(produto)
+        
+        # Adiciona ao cache de sessão
+        mlb_id = produto.get("mlb_id")
+        if mlb_id:
+            self.produtos_processados_sessao.add(mlb_id)
+        
+        # Salva cache incrementalmente a cada 10 produtos
+        self.contador_produtos_processados += 1
+        if self.contador_produtos_processados % 10 == 0:
+            self.cache_manager.salvar_cache()
+    
+    def limpar_cache(self):
+        """Limpa todo o cache (uso manual)"""
+        if self.cache_manager:
+            self.cache_manager.limpar_cache_completo()
+            self.cache_manager.salvar_cache(force=True)
+        self.produtos_processados_sessao.clear()
+    
+    def estatisticas_cache(self) -> Optional[Dict[str, Any]]:
+        """Retorna estatísticas do cache"""
+        if not self.cache_manager:
+            return None
+        return self.cache_manager.estatisticas()
+    
+    # =========================================
     # SCRAPING DE OFERTAS
     # =========================================
     
@@ -418,6 +723,10 @@ class ScraperMLAfiliado:
         """)
         
         print(f"✅ Encontrados {len(links)} produtos")
+        
+        # Filtra produtos já processados usando cache
+        links = self._filtrar_links_cache(links)
+        
         return links
     
     async def extrair_dados_produto(self, url: str) -> dict:
@@ -554,6 +863,9 @@ class ScraperMLAfiliado:
             print(f"     ❌ Erro na extração: {e}")
             import traceback
             print(f"     📋 Stack trace: {traceback.format_exc()}")
+        
+        # Adiciona produto ao cache
+        self._adicionar_produto_cache(produto)
         
         return produto
     
@@ -790,6 +1102,11 @@ class ScraperMLAfiliado:
         """
         max_produtos = max_produtos or self.max_produtos
         
+        # Mostra estatísticas do cache no início
+        if self.usar_cache and self.cache_manager:
+            stats = self.cache_manager.estatisticas()
+            print(f"\n📊 Cache: {stats['total_produtos']} produtos, {stats['com_link_afiliado']} com link")
+        
         # Verifica login
         if not await self.verificar_login():
             print("\n⚠️ Você precisa fazer login primeiro!")
@@ -797,9 +1114,13 @@ class ScraperMLAfiliado:
             if not logou:
                 return []
         
-        # Obtém lista de links
+        # Obtém lista de links (já filtrada pelo cache)
         links = await self.obter_links_ofertas(url)
         links = links[:max_produtos]
+        
+        if not links:
+            print(f"\n🎯 Nenhum produto novo para processar!")
+            return []
         
         print(f"\n🚀 Iniciando extração de {len(links)} produtos...")
         print("="*60)
@@ -820,6 +1141,13 @@ class ScraperMLAfiliado:
         
         print("\n" + "="*60)
         print(f"✅ Concluído: {sucesso} com link | ❌ {falha} sem link")
+        
+        # Mostra estatísticas finais do cache
+        if self.usar_cache and self.cache_manager:
+            stats_final = self.cache_manager.estatisticas()
+            total_cache = stats_final['total_produtos']
+            print(f"📊 Cache atualizado: {total_cache} produtos total")
+        
         print("="*60)
         
         return produtos
@@ -840,7 +1168,11 @@ class ScraperMLAfiliado:
 # =========================================
 
 async def main():
-    """Exemplo de uso"""
+    """Exemplo de uso com sistema de cache"""
+    import sys
+    
+    # Verifica argumento para limpar cache
+    limpar_cache = "--limpar-cache" in sys.argv
     
     print("\n" + "="*60)
     print("🛒 SCRAPER MERCADO LIVRE AFILIADO")
@@ -851,23 +1183,53 @@ async def main():
         headless=False,
         wait_ms=1500,
         max_produtos=50,
-        etiqueta="egnofertas"
+        etiqueta="egnofertas",
+        usar_cache=True,  # Cache habilitado por padrão
+        cache_file="cache_produtos.json"
     ) as scraper:
+        
+        # Limpa cache se solicitado
+        if limpar_cache:
+            print("🗑️ Limpando cache conforme solicitado...")
+            scraper.limpar_cache()
+        
+        # Mostra estatísticas do cache
+        if scraper.usar_cache:
+            stats = scraper.estatisticas_cache()
+            if stats and stats['total_produtos'] > 0:
+                print(f"\n📊 ESTATÍSTICAS DO CACHE:")
+                print(f"   • Total produtos: {stats['total_produtos']}")
+                print(f"   • Com link afiliado: {stats['com_link_afiliado']}")
+                print(f"   • Tamanho arquivo: {stats['tamanho_arquivo_kb']} KB")
+                print(f"   • Status: {stats['status']}")
         
         # Executa scraping
         produtos = await scraper.scrape_ofertas()
         
-        # Salva resultados
+        # Salva resultados se houver produtos novos
         if produtos:
-            await scraper.salvar_resultados(produtos)
+            arquivo = await scraper.salvar_resultados(produtos)
+            print(f"💾 Dados salvos em: {arquivo}")
             
             # Mostra amostra
             print("\n📋 Amostra dos resultados:")
             for p in produtos[:3]:
-                print(f"\n  • {p['nome'][:50] if p['nome'] else 'N/A'}...")
-                print(f"    Preço: R$ {p['preco_atual']}")
-                print(f"    Link: {p['url_curta']}")
+                nome = p['nome'][:40] if p['nome'] else 'N/A'
+                preco = f"R$ {p['preco_atual']}" if p['preco_atual'] else 'N/A'
+                link = p['url_curta'][:50] if p['url_curta'] else 'Sem link'
+                print(f"\n  • {nome}...")
+                print(f"    Preço: {preco}")
+                print(f"    Link: {link}")
+        else:
+            print("\n🎯 Nenhum produto novo encontrado!")
+        
+        # Estatísticas finais do cache
+        if scraper.usar_cache:
+            stats_final = scraper.estatisticas_cache()
+            if stats_final:
+                print(f"\n📊 Cache final: {stats_final['total_produtos']} produtos")
 
 
 if __name__ == "__main__":
+    print("\n💡 Dica: Use 'python scraper_ml_afiliado.py --limpar-cache' para resetar o cache")
     asyncio.run(main())

@@ -18,21 +18,24 @@ def setup_logging(log_name: str = "app", filename_prefix: str = "app") -> loggin
     logger.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
     logger.propagate = False
 
-    if logger.handlers:
-        return logger
-
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    has_managed_stream = any(getattr(h, "_scraper_stream_handler", False) for h in logger.handlers)
+    if not has_managed_stream:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler._scraper_stream_handler = True  # type: ignore[attr-defined]
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    has_managed_file = any(getattr(h, "_scraper_file_handler", False) for h in logger.handlers)
+    if not has_managed_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler._scraper_file_handler = True  # type: ignore[attr-defined]
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 

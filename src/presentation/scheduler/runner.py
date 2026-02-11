@@ -17,11 +17,13 @@ class ScraperScheduler:
         intervalo_minutos: int,
         max_produtos: int,
         job_timeout_seconds: int,
+        executar_cupons: bool = True,
         headless: bool = True,
     ):
         self.intervalo_minutos = intervalo_minutos
         self.max_produtos = max_produtos
         self.job_timeout_seconds = job_timeout_seconds
+        self.executar_cupons = executar_cupons
         self.headless = headless
         self.rodando = False
         self.proximo_run: datetime | None = None
@@ -41,12 +43,15 @@ class ScraperScheduler:
             f"Iniciando execucao sequencial | max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds}"
         )
         started_at = datetime.now()
+        job_sequence = ("ofertas", "ofertas_relampago", "cupons") if self.executar_cupons else ("ofertas", "ofertas_relampago")
+        self.logger.info(f"Sequencia de jobs configurada: {', '.join(job_sequence)}")
         async with build_container() as container:
             results = await run_jobs_in_sequence(
                 job_use_case=container.job_use_case,
                 engine_factory=lambda: container.engine_factory(headless=self.headless, max_produtos=self.max_produtos),
                 max_items=self.max_produtos,
                 timeout_seconds=self.job_timeout_seconds,
+                job_sequence=job_sequence,
             )
         finished_at = datetime.now()
         payload = {
@@ -55,8 +60,9 @@ class ScraperScheduler:
             "duracao_segundos": int((finished_at - started_at).total_seconds()),
             "ofertas": results.ofertas.__dict__,
             "ofertas_relampago": results.ofertas_relampago.__dict__,
-            "cupons": results.cupons.__dict__,
         }
+        if results.cupons is not None:
+            payload["cupons"] = results.cupons.__dict__
         self.logger.info("Execucao sequencial concluida com sucesso")
         return payload
 
@@ -68,7 +74,7 @@ class ScraperScheduler:
         self.logger.info("Scheduler iniciado")
         self.logger.info(
             f"Configuracao | intervalo_minutos={self.intervalo_minutos} "
-            f"max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds}"
+            f"max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds} executar_cupons={self.executar_cupons}"
         )
         self.rodando = True
 
@@ -111,6 +117,11 @@ def main() -> None:
         default=settings.scheduler_job_timeout_seconds,
         help="Timeout por job em segundos",
     )
+    parser.add_argument(
+        "--sem-cupons",
+        action="store_true",
+        help="Executa apenas ofertas e ofertas_relampago",
+    )
     parser.add_argument("--agora", action="store_true", help="Executa uma rodada completa e sai")
     args = parser.parse_args()
 
@@ -118,6 +129,7 @@ def main() -> None:
         intervalo_minutos=args.intervalo,
         max_produtos=args.produtos,
         job_timeout_seconds=args.job_timeout_seconds,
+        executar_cupons=not args.sem_cupons,
         headless=True,
     )
     if args.agora:

@@ -21,6 +21,7 @@ tests/                    # testes
 - API: `uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`
 - Pipeline: `python -m apps.pipeline.main --max-produtos 30 --headless`
 - Scheduler: `python -m apps.scheduler.main --intervalo 30 --produtos 30 --job-timeout-seconds 30`
+- Scheduler (sem cupons): `python -m apps.scheduler.main --intervalo 30 --produtos 30 --job-timeout-seconds 30 --sem-cupons`
 - Scraper manual: `python -m apps.scraper.main`
 - Login local/cookies: `python -m apps.scraper.login_local`
 

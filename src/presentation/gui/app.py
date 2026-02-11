@@ -97,14 +97,39 @@ class ScraperGUI:
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
     def _setup_logging(self) -> None:
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%H:%M:%S")
+
         self.logger = logging.getLogger("gui")
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
-        self.logger.handlers.clear()
+        for handler in list(self.logger.handlers):
+            if getattr(handler, "_gui_queue_handler", False):
+                self.logger.removeHandler(handler)
 
+        self._attach_queue_handler(self.logger, formatter)
+        # Logs de "scraperofertas.scraper" propagam para "scraperofertas" (sem duplicar no painel).
+        for logger_name in ("scraperofertas", "scheduler"):
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.INFO)
+            self._attach_queue_handler(logger, formatter)
+
+    def _attach_queue_handler(self, logger: logging.Logger, formatter: logging.Formatter) -> None:
+        for existing in logger.handlers:
+            if getattr(existing, "_gui_queue_handler", False):
+                return
         handler = QueueLogHandler(self.log_queue)
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S"))
-        self.logger.addHandler(handler)
+        handler._gui_queue_handler = True  # type: ignore[attr-defined]
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    def _show_info_async(self, title: str, message: str) -> None:
+        self.root.after(0, lambda t=title, m=message: messagebox.showinfo(t, m))
+
+    def _show_warning_async(self, title: str, message: str) -> None:
+        self.root.after(0, lambda t=title, m=message: messagebox.showwarning(t, m))
+
+    def _show_error_async(self, title: str, message: str) -> None:
+        self.root.after(0, lambda t=title, m=message: messagebox.showerror(t, m))
 
     def _process_log_queue(self) -> None:
         try:
@@ -158,13 +183,14 @@ class ScraperGUI:
             ok = asyncio.run(login_async())
             if ok:
                 self.logger.info("Login atualizado com sucesso.")
-                self.root.after(0, lambda: messagebox.showinfo("Sucesso", "Login atualizado com sucesso."))
+                self._show_info_async("Sucesso", "Login atualizado com sucesso.")
             else:
                 self.logger.warning("Login nao confirmado.")
-                self.root.after(0, lambda: messagebox.showwarning("Aviso", "Login nao confirmado."))
+                self._show_warning_async("Aviso", "Login nao confirmado.")
         except Exception as exc:
-            self.logger.error(f"Erro ao atualizar login: {exc}")
-            self.root.after(0, lambda: messagebox.showerror("Erro", f"Falha ao atualizar login: {exc}"))
+            error_msg = f"Falha ao atualizar login: {exc}"
+            self.logger.error(error_msg)
+            self._show_error_async("Erro", error_msg)
         finally:
             self.is_running = False
             self.root.after(0, lambda: self._set_buttons_state(True))
@@ -226,34 +252,29 @@ class ScraperGUI:
                     f"relampago_novos={result.ofertas_relampago.novos} "
                     f"cupons_novos={result.cupons.novos}"
                 )
-                self.root.after(
-                    0,
-                    lambda: messagebox.showinfo(
-                        "Sucesso",
-                        "Executar Todos finalizado.\n"
-                        f"Ofertas novos: {result.ofertas.novos}\n"
-                        f"Relampago novos: {result.ofertas_relampago.novos}\n"
-                        f"Cupons novos: {result.cupons.novos}",
-                    ),
+                self._show_info_async(
+                    "Sucesso",
+                    "Executar Todos finalizado.\n"
+                    f"Ofertas novos: {result.ofertas.novos}\n"
+                    f"Relampago novos: {result.ofertas_relampago.novos}\n"
+                    f"Cupons novos: {result.cupons.novos}",
                 )
             else:
                 self.logger.info(
                     "Execucao concluida | "
                     f"scraper={scraper_type} novos={result.novos} existentes={result.existentes} erros={result.erros}"
                 )
-                self.root.after(
-                    0,
-                    lambda: messagebox.showinfo(
-                        "Sucesso",
-                        f"Tarefa {scraper_type} finalizada.\n"
-                        f"Novos: {result.novos}\n"
-                        f"Existentes: {result.existentes}\n"
-                        f"Erros: {result.erros}",
-                    ),
+                self._show_info_async(
+                    "Sucesso",
+                    f"Tarefa {scraper_type} finalizada.\n"
+                    f"Novos: {result.novos}\n"
+                    f"Existentes: {result.existentes}\n"
+                    f"Erros: {result.erros}",
                 )
         except Exception as exc:
-            self.logger.error(f"Falha na tarefa {scraper_type}: {exc}")
-            self.root.after(0, lambda: messagebox.showerror("Erro", f"Falha na tarefa {scraper_type}: {exc}"))
+            error_msg = f"Falha na tarefa {scraper_type}: {exc}"
+            self.logger.error(error_msg)
+            self._show_error_async("Erro", error_msg)
         finally:
             self.is_running = False
             self.root.after(0, lambda: self.update_status("Pronto"))

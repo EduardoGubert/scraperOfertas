@@ -10,6 +10,9 @@ class IOfferRepository(Protocol):
     async def exists_offer(self, table: str, chave_dedupe: str, mlb_id: str | None) -> bool:
         ...
 
+    async def ensure_offer_schema_compatibility(self, table: str, required_columns: set[str]) -> set[str]:
+        ...
+
     async def upsert_offer(self, table: str, offer: OfferEntity, include_tempo: bool = False) -> tuple[int, bool]:
         ...
 

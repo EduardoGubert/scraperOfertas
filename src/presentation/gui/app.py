@@ -10,6 +10,7 @@ from tkinter import messagebox, scrolledtext, ttk
 
 from src.application.use_cases.run_all_jobs import run_jobs_in_sequence
 from src.bootstrap import build_container
+from src.domain.value_objects.categories import gui_category_options, resolve_category_filters
 from src.infrastructure.config.settings import get_settings
 
 
@@ -55,6 +56,50 @@ class ScraperGUI:
         ttk.Label(config, text="Max itens por job:").grid(row=0, column=0, sticky=tk.W)
         self.max_items_var = tk.StringVar(value=str(self.settings.scheduler_max_produtos))
         ttk.Entry(config, textvariable=self.max_items_var, width=8).grid(row=0, column=1, sticky=tk.W, padx=(8, 0))
+        ttk.Label(config, text="Min desconto (%):").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        self.min_desconto_var = tk.StringVar(value=str(self.settings.offers_min_desconto_percent))
+        ttk.Entry(config, textvariable=self.min_desconto_var, width=8).grid(row=1, column=1, sticky=tk.W, padx=(8, 0), pady=(6, 0))
+        ttk.Label(config, text="Min comissao (%):").grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        self.min_comissao_var = tk.StringVar(value=str(self.settings.offers_min_comissao_percent))
+        ttk.Entry(config, textvariable=self.min_comissao_var, width=8).grid(row=2, column=1, sticky=tk.W, padx=(8, 0), pady=(6, 0))
+        ttk.Label(config, text="Categorias (Ctrl+clique):").grid(row=3, column=0, sticky=tk.W, pady=(6, 0))
+        category_options = gui_category_options()
+        self.categorias_listbox = tk.Listbox(
+            config,
+            selectmode=tk.MULTIPLE,
+            exportselection=False,
+            height=6,
+            width=34,
+        )
+        self.categorias_listbox.grid(row=3, column=1, sticky=tk.W, padx=(8, 0), pady=(6, 0))
+        for option in category_options:
+            self.categorias_listbox.insert(tk.END, option)
+
+        default_categories = resolve_category_filters(self.settings.offers_categoria_filter)
+        if default_categories:
+            for idx, option in enumerate(category_options):
+                option_filters = resolve_category_filters(option)
+                if option_filters and option_filters[0] in default_categories:
+                    self.categorias_listbox.selection_set(idx)
+        else:
+            self.categorias_listbox.selection_set(0)
+
+        ttk.Label(config, text="Categorias extras (virgula):").grid(row=4, column=0, sticky=tk.W, pady=(6, 0))
+        self.categoria_extra_var = tk.StringVar(value="")
+        ttk.Entry(config, textvariable=self.categoria_extra_var, width=34).grid(
+            row=4,
+            column=1,
+            sticky=tk.W,
+            padx=(8, 0),
+            pady=(6, 0),
+        )
+
+        self.visual_browser_var = tk.BooleanVar(value=not self.settings.scraper_headless)
+        ttk.Checkbutton(
+            config,
+            text="Abrir navegador visual (nao headless)",
+            variable=self.visual_browser_var,
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, sticky=tk.W, pady=(0, 12))
@@ -95,6 +140,8 @@ class ScraperGUI:
             font=("Consolas", 9),
         )
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.log_text.tag_configure("audit_aprovado", foreground="#0f7b0f")
+        self.log_text.tag_configure("audit_filtrado", foreground="#b22222")
 
     def _setup_logging(self) -> None:
         formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s", "%H:%M:%S")
@@ -136,7 +183,16 @@ class ScraperGUI:
             while True:
                 message = self.log_queue.get_nowait()
                 self.log_text.config(state="normal")
-                self.log_text.insert(tk.END, message + "\n")
+                tag: str | None = None
+                if "Relatorio auditoria | Aprovado |" in message:
+                    tag = "audit_aprovado"
+                elif "Relatorio auditoria | Filtrado |" in message:
+                    tag = "audit_filtrado"
+
+                if tag:
+                    self.log_text.insert(tk.END, message + "\n", tag)
+                else:
+                    self.log_text.insert(tk.END, message + "\n")
                 self.log_text.see(tk.END)
                 self.log_text.config(state="disabled")
         except queue.Empty:
@@ -162,6 +218,31 @@ class ScraperGUI:
         if parsed <= 0:
             raise ValueError("max itens precisa ser maior que zero")
         return parsed
+
+    def _parse_offer_filters(self) -> tuple[int, int]:
+        min_desconto_raw = self.min_desconto_var.get().strip()
+        min_comissao_raw = self.min_comissao_var.get().strip()
+
+        min_desconto = self.settings.offers_min_desconto_percent if not min_desconto_raw else int(min_desconto_raw)
+        min_comissao = self.settings.offers_min_comissao_percent if not min_comissao_raw else int(min_comissao_raw)
+
+        if min_desconto < 0:
+            raise ValueError("min desconto precisa ser maior ou igual a zero")
+        if min_comissao < 0:
+            raise ValueError("min comissao precisa ser maior ou igual a zero")
+
+        return min_desconto, min_comissao
+
+    def _parse_category_filters(self) -> list[str]:
+        selected_values = [self.categorias_listbox.get(idx) for idx in self.categorias_listbox.curselection()]
+        extras = self.categoria_extra_var.get().strip()
+        raw_values = list(selected_values)
+        if extras:
+            raw_values.append(extras)
+        return resolve_category_filters(raw_values)
+
+    def _parse_headless_mode(self) -> bool:
+        return not bool(self.visual_browser_var.get())
 
     def on_login(self) -> None:
         if self.is_running:
@@ -203,13 +284,25 @@ class ScraperGUI:
 
         try:
             max_items = self._parse_max_items()
+            min_desconto, min_comissao = self._parse_offer_filters()
+            category_filters = self._parse_category_filters()
+            headless = self._parse_headless_mode()
         except ValueError as exc:
             messagebox.showerror("Erro", str(exc))
             return
 
+        categories_label = ", ".join(category_filters) if category_filters else "todas"
+        filtros_msg = (
+            f"Filtros: desconto>={min_desconto}% | comissao>={min_comissao}% | categoria={categories_label}"
+            if scraper_type in {"ofertas", "ofertas_relampago", "todos"}
+            else "Filtros de desconto/comissao nao se aplicam a cupons"
+        )
         confirm = messagebox.askyesno(
             "Confirmar",
-            f"Executar '{scraper_type}' com max {max_items} itens?\nA interface continuara responsiva.",
+            "Executar "
+            f"'{scraper_type}' com max {max_items} itens?\n{filtros_msg}\n"
+            f"Navegador visual: {'sim' if not headless else 'nao'}\n"
+            "A interface continuara responsiva.",
         )
         if not confirm:
             return
@@ -217,11 +310,32 @@ class ScraperGUI:
         self.is_running = True
         self._set_buttons_state(False)
         self.update_status(f"Executando {scraper_type}...")
-        threading.Thread(target=self._run_job_worker, args=(scraper_type, max_items), daemon=True).start()
+        category_filter_payload = category_filters or None
+        threading.Thread(
+            target=self._run_job_worker,
+            args=(scraper_type, max_items, min_desconto, min_comissao, category_filter_payload, headless),
+            daemon=True,
+        ).start()
 
-    def _run_job_worker(self, scraper_type: str, max_items: int) -> None:
+    def _run_job_worker(
+        self,
+        scraper_type: str,
+        max_items: int,
+        min_desconto: int,
+        min_comissao: int,
+        category_filters: list[str] | None,
+        headless: bool,
+    ) -> None:
         try:
-            self.logger.info(f"Iniciando tarefa: {scraper_type} max_items={max_items}")
+            categories_label = ", ".join(category_filters) if category_filters else "todas"
+            self.logger.info(
+                "Iniciando tarefa: "
+                f"{scraper_type} max_items={max_items} min_desconto={min_desconto} "
+                f"min_comissao={min_comissao} categoria={categories_label} "
+                f"headless={headless}"
+            )
+            if scraper_type == "cupons":
+                self.logger.info("Filtros de desconto/comissao/categoria nao se aplicam a cupons")
 
             async def run_async():
                 async with build_container(self.settings) as container:
@@ -229,46 +343,59 @@ class ScraperGUI:
                         return await run_jobs_in_sequence(
                             job_use_case=container.job_use_case,
                             engine_factory=lambda: container.engine_factory(
-                                headless=True,
+                                headless=headless,
                                 max_produtos=max_items,
                             ),
                             max_items=max_items,
                             timeout_seconds=self.settings.scheduler_job_timeout_seconds,
+                            min_desconto_percent=min_desconto,
+                            min_comissao_percent=min_comissao,
+                            category_filter=category_filters,
                         )
 
-                    async with container.engine_factory(headless=True, max_produtos=max_items) as engine:
+                    async with container.engine_factory(headless=headless, max_produtos=max_items) as engine:
                         return await container.job_use_case.execute(
                             scraper_type=scraper_type,
                             max_items=max_items,
                             engine=engine,
+                            min_desconto_percent=min_desconto,
+                            min_comissao_percent=min_comissao,
+                            category_filter=category_filters,
                         )
 
             result = asyncio.run(run_async())
 
             if scraper_type == "todos":
+                cupons_novos = result.cupons.novos if result.cupons is not None else 0
                 self.logger.info(
                     "Execucao concluida | "
                     f"ofertas_novos={result.ofertas.novos} "
                     f"relampago_novos={result.ofertas_relampago.novos} "
-                    f"cupons_novos={result.cupons.novos}"
+                    f"cupons_novos={cupons_novos} "
+                    f"ofertas_filtrados={result.ofertas.filtrados} "
+                    f"relampago_filtrados={result.ofertas_relampago.filtrados}"
                 )
                 self._show_info_async(
                     "Sucesso",
                     "Executar Todos finalizado.\n"
                     f"Ofertas novos: {result.ofertas.novos}\n"
+                    f"Ofertas filtrados: {result.ofertas.filtrados}\n"
                     f"Relampago novos: {result.ofertas_relampago.novos}\n"
-                    f"Cupons novos: {result.cupons.novos}",
+                    f"Relampago filtrados: {result.ofertas_relampago.filtrados}\n"
+                    f"Cupons novos: {cupons_novos}",
                 )
             else:
                 self.logger.info(
                     "Execucao concluida | "
-                    f"scraper={scraper_type} novos={result.novos} existentes={result.existentes} erros={result.erros}"
+                    f"scraper={scraper_type} novos={result.novos} existentes={result.existentes} "
+                    f"filtrados={result.filtrados} erros={result.erros}"
                 )
                 self._show_info_async(
                     "Sucesso",
                     f"Tarefa {scraper_type} finalizada.\n"
                     f"Novos: {result.novos}\n"
                     f"Existentes: {result.existentes}\n"
+                    f"Filtrados: {result.filtrados}\n"
                     f"Erros: {result.erros}",
                 )
         except Exception as exc:

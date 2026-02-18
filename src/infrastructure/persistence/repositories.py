@@ -32,6 +32,21 @@ class PostgresOfferRepository(IOfferRepository):
                 return bool(exists)
             return False
 
+    async def ensure_offer_schema_compatibility(self, table: str, required_columns: set[str]) -> set[str]:
+        pool = self.connection.require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = $1
+                  AND table_schema = ANY(current_schemas(false))
+                """,
+                table,
+            )
+        existing_columns = {str(row["column_name"]) for row in rows}
+        return set(required_columns) - existing_columns
+
     async def upsert_offer(self, table: str, offer: OfferEntity, include_tempo: bool = False) -> tuple[int, bool]:
         pool = self.connection.require_pool()
         # Compatibilidade com bases legadas que ainda usam TIMESTAMP sem timezone.
@@ -41,12 +56,12 @@ class PostgresOfferRepository(IOfferRepository):
             insert_sql = f"""
             INSERT INTO {table} (
                 mlb_id, chave_dedupe, url_original, url_curta, url_afiliado, product_id,
-                nome, foto_url, preco_atual, preco_original, desconto, status,
+                nome, foto_url, preco_atual, preco_original, desconto, comissao_percentual, status,
                 tempo_para_acabar, created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12,
-                $13, $14, $14
+                $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $15
             )
             ON CONFLICT (chave_dedupe)
             DO UPDATE SET
@@ -60,6 +75,7 @@ class PostgresOfferRepository(IOfferRepository):
                 preco_atual = EXCLUDED.preco_atual,
                 preco_original = EXCLUDED.preco_original,
                 desconto = EXCLUDED.desconto,
+                comissao_percentual = EXCLUDED.comissao_percentual,
                 status = EXCLUDED.status,
                 tempo_para_acabar = EXCLUDED.tempo_para_acabar,
                 updated_at = EXCLUDED.updated_at
@@ -77,6 +93,7 @@ class PostgresOfferRepository(IOfferRepository):
                 offer.preco_atual,
                 offer.preco_original,
                 offer.desconto,
+                offer.comissao_percentual,
                 offer.status,
                 offer.tempo_para_acabar,
                 current_time,
@@ -85,12 +102,12 @@ class PostgresOfferRepository(IOfferRepository):
             insert_sql = f"""
             INSERT INTO {table} (
                 mlb_id, chave_dedupe, url_original, url_curta, url_afiliado, product_id,
-                nome, foto_url, preco_atual, preco_original, desconto, status,
+                nome, foto_url, preco_atual, preco_original, desconto, comissao_percentual, status,
                 created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12,
-                $13, $13
+                $7, $8, $9, $10, $11, $12, $13,
+                $14, $14
             )
             ON CONFLICT (chave_dedupe)
             DO UPDATE SET
@@ -104,6 +121,7 @@ class PostgresOfferRepository(IOfferRepository):
                 preco_atual = EXCLUDED.preco_atual,
                 preco_original = EXCLUDED.preco_original,
                 desconto = EXCLUDED.desconto,
+                comissao_percentual = EXCLUDED.comissao_percentual,
                 status = EXCLUDED.status,
                 updated_at = EXCLUDED.updated_at
             RETURNING id, (xmax = 0) AS inserted;
@@ -120,6 +138,7 @@ class PostgresOfferRepository(IOfferRepository):
                 offer.preco_atual,
                 offer.preco_original,
                 offer.desconto,
+                offer.comissao_percentual,
                 offer.status,
                 current_time,
             )

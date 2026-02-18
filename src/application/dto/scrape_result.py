@@ -10,6 +10,7 @@ class ScrapeResultDTO:
     total_coletados: int = 0
     novos: int = 0
     existentes: int = 0
+    filtrados: int = 0
     erros: int = 0
     itens: list[dict[str, Any]] = field(default_factory=list)
     detalhes_erros: list[str] = field(default_factory=list)

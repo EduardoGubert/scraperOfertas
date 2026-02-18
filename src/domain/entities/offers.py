@@ -39,6 +39,8 @@ class OfferEntity:
     preco_atual: Optional[Decimal] = None
     preco_original: Optional[Decimal] = None
     desconto: Optional[int] = None
+    comissao_percentual: Optional[int] = None
+    categoria: Optional[str] = None
     status: str = "ativo"
     chave_dedupe: str = field(default="")
     tempo_para_acabar: Optional[str] = None
@@ -52,6 +54,7 @@ class OfferEntity:
         url_curta = (payload.get("url_curta") or "").strip() or None
         url_afiliado = (payload.get("url_afiliado") or "").strip() or None
         foto_url = (payload.get("foto_url") or "").strip() or None
+        categoria = (payload.get("categoria") or "").strip() or None
         status = (payload.get("status") or "ativo").strip() or "ativo"
         tempo = (payload.get("tempo_para_acabar") or "").strip() or None if include_tempo else None
 
@@ -66,6 +69,8 @@ class OfferEntity:
             preco_atual=_to_decimal(payload.get("preco_atual")),
             preco_original=_to_decimal(payload.get("preco_original")),
             desconto=_to_int(payload.get("desconto")),
+            comissao_percentual=_to_int(payload.get("comissao_percentual")),
+            categoria=categoria,
             status=status,
             tempo_para_acabar=tempo,
         )

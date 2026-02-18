@@ -8,7 +8,15 @@ class _FakeUseCase:
     def __init__(self):
         self.calls: list[str] = []
 
-    async def execute(self, scraper_type: str, max_items: int, engine):
+    async def execute(
+        self,
+        scraper_type: str,
+        max_items: int,
+        engine,
+        min_desconto_percent=None,
+        min_comissao_percent=None,
+        category_filter=None,
+    ):
         self.calls.append(scraper_type)
         return ScrapeResultDTO(scraper_type=scraper_type)
 

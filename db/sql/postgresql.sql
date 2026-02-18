@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS ml_ofertas (
     preco_atual DECIMAL(12,2),
     preco_original DECIMAL(12,2),
     desconto INTEGER,
+    comissao_percentual INTEGER,
     status VARCHAR(20) DEFAULT 'ativo',
     enviado_whatsapp BOOLEAN DEFAULT false,
     enviado_whatsapp_at TIMESTAMPTZ,
@@ -29,11 +30,13 @@ CREATE TABLE IF NOT EXISTS ml_ofertas (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_ofertas_chave_dedupe ON ml_ofertas(chave_dedupe);
 CREATE INDEX IF NOT EXISTS idx_ml_ofertas_mlb_id ON ml_ofertas(mlb_id);
 CREATE INDEX IF NOT EXISTS idx_ml_ofertas_created_at ON ml_ofertas(created_at DESC);
+ALTER TABLE ml_ofertas ADD COLUMN IF NOT EXISTS comissao_percentual INTEGER;
 
 CREATE TABLE IF NOT EXISTS ml_ofertas_relampago (
     LIKE ml_ofertas INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
 );
 ALTER TABLE ml_ofertas_relampago ADD COLUMN IF NOT EXISTS tempo_para_acabar TEXT;
+ALTER TABLE ml_ofertas_relampago ADD COLUMN IF NOT EXISTS comissao_percentual INTEGER;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_ofertas_relampago_chave_dedupe ON ml_ofertas_relampago(chave_dedupe);
 CREATE INDEX IF NOT EXISTS idx_ml_ofertas_relampago_mlb_id ON ml_ofertas_relampago(mlb_id);
 CREATE INDEX IF NOT EXISTS idx_ml_ofertas_relampago_created_at ON ml_ofertas_relampago(created_at DESC);

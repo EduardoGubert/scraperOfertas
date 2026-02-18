@@ -45,6 +45,13 @@ class Settings:
     scraper_wait_ms: int = _as_int(os.getenv("SCRAPER_WAIT_MS"), 1500)
     scraper_api_key: str = os.getenv("SCRAPER_API_KEY", "egn-2025-secret-key")
     scraper_max_produtos_default: int = _as_int(os.getenv("SCRAPER_MAX_PRODUTOS_DEFAULT"), 30)
+    offers_min_desconto_percent: int = _as_int(os.getenv("OFFERS_MIN_DESCONTO_PERCENT"), 30)
+    offers_min_comissao_percent: int = _as_int(os.getenv("OFFERS_MIN_COMISSAO_PERCENT"), 10)
+    offers_categoria_filter: str = os.getenv("OFFERS_CATEGORIA_FILTER", "")
+    offers_ganhos_xpath: str = os.getenv(
+        "OFFERS_GANHOS_XPATH",
+        "/html/body/div[1]/nav/div/div[3]/div[1]/div/span",
+    )
 
     cache_backend: str = os.getenv("CACHE_BACKEND", "redis")
     cache_ttl_seconds: int = _as_int(os.getenv("CACHE_TTL_SECONDS"), 86400)

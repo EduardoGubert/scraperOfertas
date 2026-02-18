@@ -10,6 +10,7 @@ def test_offer_entity_from_raw_generates_dedupe_and_numbers():
         "preco_atual": "19.90",
         "preco_original": "39.90",
         "desconto": "50",
+        "comissao_percentual": "16",
         "nome": "Produto Teste",
     }
     entity = OfferEntity.from_raw(raw)
@@ -17,6 +18,7 @@ def test_offer_entity_from_raw_generates_dedupe_and_numbers():
     assert entity.preco_atual == Decimal("19.90")
     assert entity.preco_original == Decimal("39.90")
     assert entity.desconto == 50
+    assert entity.comissao_percentual == 16
     assert entity.chave_dedupe == "mlb:MLB123456789"
     assert entity.minimal_required() is True
 

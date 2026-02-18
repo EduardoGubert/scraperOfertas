@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,7 @@ from src.infrastructure.scraping.selectors.coupons import (
     CUPONS_URL,
 )
 from src.infrastructure.scraping.selectors.offers import (
+    GANHOS_COMISSAO_XPATH,
     OFFERS_RELAMPAGO_URL,
     OFFERS_URL,
     PAGINATION_CONTAINER_XPATH,
@@ -39,11 +41,13 @@ class MercadoLivrePlaywrightScraper:
         wait_ms: int = 1500,
         max_produtos: int = 30,
         user_data_dir: str | None = None,
+        ganhos_xpath: str | None = None,
     ):
         self.headless = headless
         self.wait_ms = wait_ms
         self.max_produtos = max_produtos
         self.user_data_dir = user_data_dir or self.USER_DATA_DIR
+        self.ganhos_xpath = ganhos_xpath or GANHOS_COMISSAO_XPATH
 
         self.playwright = None
         self.context: BrowserContext | None = None
@@ -463,6 +467,14 @@ class MercadoLivrePlaywrightScraper:
             return None
         return int(match.group(1))
 
+    def _parse_percentual(self, valor: str | None) -> int | None:
+        if not valor:
+            return None
+        match = re.search(r"(\d{1,3})\s*%", valor)
+        if not match:
+            return None
+        return int(match.group(1))
+
     async def _extract_tempo_para_acabar(self) -> str | None:
         assert self.page
         self.logger.info("Extraindo tempo restante da oferta relampago")
@@ -484,6 +496,85 @@ class MercadoLivrePlaywrightScraper:
         self.logger.info("Tempo restante extraido | valor=%s", normalized)
         return normalized
 
+    async def _extract_comissao_percentual(self) -> int | None:
+        assert self.page
+        self.logger.info("Extraindo comissao do produto | xpath=%s", self.ganhos_xpath)
+        raw_text = await self._evaluate_with_retry(
+            f"""
+            () => {{
+                const xpath = {json.dumps(self.ganhos_xpath)};
+                const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                if (!node) return null;
+                const value = (node.textContent || node.innerText || "").trim();
+                return value || null;
+            }}
+            """,
+            retries=3,
+            reason="extract_comissao_percentual",
+        )
+        if not raw_text:
+            self.logger.warning("Comissao nao encontrada no produto | xpath=%s", self.ganhos_xpath)
+            return None
+
+        percentual = self._parse_percentual(str(raw_text))
+        if percentual is None:
+            self.logger.warning("Texto de comissao sem percentual valido | texto=%s", raw_text)
+            return None
+
+        self.logger.info("Comissao extraida com sucesso | texto=%s percentual=%s", raw_text, percentual)
+        return percentual
+
+    async def _extract_categoria_produto(self) -> str | None:
+        assert self.page
+        categoria = await self._evaluate_with_retry(
+            """
+            () => {
+                const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                const breadcrumbSelectors = [
+                    "nav[aria-label*='breadcrumb' i] a",
+                    ".andes-breadcrumb a",
+                    ".ui-pdp-breadcrumb a",
+                    "ol.andes-breadcrumb__list a",
+                ];
+
+                for (const selector of breadcrumbSelectors) {
+                    const nodes = Array.from(document.querySelectorAll(selector));
+                    const texts = nodes
+                        .map((node) => normalize(node.textContent || node.innerText || ""))
+                        .filter(Boolean)
+                        .filter((text) => !/^(inicio|início|home)$/i.test(text));
+                    if (texts.length) return texts[0];
+                }
+
+                const ldJsonNodes = Array.from(document.querySelectorAll("script[type='application/ld+json']"));
+                for (const node of ldJsonNodes) {
+                    const raw = normalize(node.textContent || "");
+                    if (!raw) continue;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        const candidates = Array.isArray(parsed) ? parsed : [parsed];
+                        for (const candidate of candidates) {
+                            if (candidate && typeof candidate === "object" && typeof candidate.category === "string") {
+                                const text = normalize(candidate.category);
+                                if (text) return text;
+                            }
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                return null;
+            }
+            """,
+            retries=3,
+            reason="extract_categoria_produto",
+        )
+        if categoria:
+            self.logger.info("Categoria extraida do produto | categoria=%s", categoria)
+            return str(categoria)
+        self.logger.warning("Categoria nao encontrada no produto")
+        return None
+
     async def extract_offer_product(self, url: str, include_tempo: bool = False) -> dict:
         assert self.page
         self.logger.info("Abrindo pagina de produto | url=%s include_tempo=%s", url, include_tempo)
@@ -498,6 +589,8 @@ class MercadoLivrePlaywrightScraper:
             "preco_original": None,
             "preco_atual": None,
             "desconto": None,
+            "comissao_percentual": None,
+            "categoria": None,
             "tempo_para_acabar": None,
             "status": "pendente",
             "erro": None,
@@ -518,19 +611,32 @@ class MercadoLivrePlaywrightScraper:
             dados = await self.page.evaluate(
                 """
                 () => {
+                    const normalize = (value) => (value || "").toString().replace(/\\s+/g, " ").trim();
                     const title = document.querySelector("h1.ui-pdp-title, .ui-pdp-title, h1");
-                    const current = document.querySelector(".ui-pdp-price__second-line .andes-money-amount__fraction");
+                    const currentMeta = document.querySelector("meta[itemprop='price']");
+                    const currentFraction = document.querySelector(".ui-pdp-price__second-line .andes-money-amount__fraction");
+                    const currentCents = document.querySelector(".ui-pdp-price__second-line .andes-money-amount__cents");
                     const original = document.querySelector(".ui-pdp-price__original-value .andes-money-amount__fraction, s .andes-money-amount__fraction");
-                    const discount = document.querySelector(".ui-pdp-price__second-line__label, .andes-money-amount__discount");
+                    const discount = document.querySelector(".andes-money-amount__discount, .ui-pdp-price__second-line__label");
                     const image =
                         document.querySelector("main figure img, .ui-pdp-gallery figure img, span figure img, .ui-pdp-gallery__figure img") ||
                         document.querySelector("img[src*='mlstatic'], img[src*='mercadolivre']");
 
+                    let precoAtual = "";
+                    const metaValue = normalize(currentMeta?.getAttribute("content"));
+                    if (metaValue) {
+                        precoAtual = metaValue;
+                    } else {
+                        const fraction = normalize(currentFraction?.textContent);
+                        const cents = normalize(currentCents?.textContent);
+                        precoAtual = fraction && cents ? `${fraction},${cents}` : fraction;
+                    }
+
                     return {
-                        nome: title?.textContent?.trim() || "",
-                        preco_atual: current?.textContent?.trim() || "",
-                        preco_original: original?.textContent?.trim() || "",
-                        desconto: discount?.textContent?.trim() || "",
+                        nome: normalize(title?.textContent),
+                        preco_atual: precoAtual,
+                        preco_original: normalize(original?.textContent),
+                        desconto: normalize(discount?.textContent),
                         foto_url: image?.src || image?.getAttribute("data-src") || ""
                     };
                 }
@@ -541,7 +647,12 @@ class MercadoLivrePlaywrightScraper:
             produto["foto_url"] = dados.get("foto_url") or None
             produto["preco_atual"] = self._parse_preco(dados.get("preco_atual"))
             produto["preco_original"] = self._parse_preco(dados.get("preco_original"))
-            produto["desconto"] = self._parse_desconto(dados.get("desconto"))
+            desconto_raw = dados.get("desconto")
+            desconto_match = re.search(r"(\d+)\s*%", str(desconto_raw or ""))
+            desconto_normalizado = f"{desconto_match.group(1)}%" if desconto_match else None
+            produto["desconto"] = self._parse_desconto(desconto_normalizado)
+            produto["comissao_percentual"] = await self._extract_comissao_percentual()
+            produto["categoria"] = await self._extract_categoria_produto()
 
             if include_tempo:
                 produto["tempo_para_acabar"] = await self._extract_tempo_para_acabar()
@@ -591,36 +702,142 @@ class MercadoLivrePlaywrightScraper:
 
             await btn.click()
             self.logger.info("Botao Compartilhar clicado")
-            await self._human_delay(700, 1400)
+            await self._human_delay(350, 700)
 
-            try:
-                await self.page.wait_for_selector(
-                    "input[value*='mercadolivre.com/sec'], input[value*='meli.to'], div:has-text('Link do produto')",
-                    timeout=6000,
-                )
-            except Exception:
-                pass
+            modal_selector = None
+            modal_selectors = [
+                "div[data-testid='popper'].link-generator",
+                ".link-generator",
+                ".andes-tooltip__content:has-text('Gerar link / ID de produto')",
+            ]
+            wait_start = time.perf_counter()
+            for selector in modal_selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=10000)
+                    modal_selector = selector
+                    elapsed_ms = int((time.perf_counter() - wait_start) * 1000)
+                    self.logger.info(
+                        "Modal de link detectado | selector=%s wait_ms=%s",
+                        selector,
+                        elapsed_ms,
+                    )
+                    break
+                except Exception:
+                    continue
+            if not modal_selector:
+                elapsed_ms = int((time.perf_counter() - wait_start) * 1000)
+                self.logger.warning("Modal de link nao abriu apos esperar | wait_ms=%s", elapsed_ms)
+                try:
+                    await self.page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return None
 
             result: dict[str, str] = {}
+            found_by = None
 
             try:
                 modal = await self.page.query_selector(f"xpath={SHARE_MODAL_INPUT_XPATH}")
                 if modal:
-                    input_link = await modal.query_selector("input[type='text'], input[readonly]")
+                    input_link = await modal.query_selector("textarea[data-testid='text-field__label_link']")
+                    if not input_link:
+                        input_link = await modal.query_selector("textarea#P0-1")
+                    if not input_link:
+                        input_link = await modal.query_selector(
+                            "textarea, input[type='text'], input[readonly], textarea[readonly]"
+                        )
                     if input_link:
-                        value = await input_link.get_attribute("value")
+                        value = await input_link.input_value()
+                        if not value:
+                            value = await input_link.get_attribute("value")
                         if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
                             result["url_curta"] = value.strip()
+                            found_by = "legacy_xpath_modal"
             except Exception:
                 pass
 
             if not result.get("url_curta"):
-                inputs = await self.page.query_selector_all("input[type='text'], input[readonly]")
+                primary = await self.page.query_selector("textarea[data-testid='text-field__label_link']")
+                if primary:
+                    value = await primary.input_value()
+                    if not value:
+                        value = await primary.get_attribute("value")
+                    if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
+                        result["url_curta"] = value.strip()
+                        found_by = "textarea[data-testid='text-field__label_link']"
+
+            if not result.get("url_curta"):
+                secondary = await self.page.query_selector("textarea#P0-1")
+                if secondary:
+                    value = await secondary.input_value()
+                    if not value:
+                        value = await secondary.get_attribute("value")
+                    if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
+                        result["url_curta"] = value.strip()
+                        found_by = "textarea#P0-1"
+
+            if not result.get("url_curta"):
+                inputs = await self.page.query_selector_all(
+                    "textarea, input[type='text'], input[readonly], textarea[readonly]"
+                )
                 for input_elem in inputs:
-                    value = await input_elem.get_attribute("value") or ""
+                    value = await input_elem.input_value()
+                    if not value:
+                        value = await input_elem.get_attribute("value") or ""
                     if "mercadolivre.com/sec/" in value or "meli.to/" in value:
                         result["url_curta"] = value.strip()
+                        found_by = "generic_fields_scan"
                         break
+
+            if not result.get("url_curta"):
+                copy_btn = await self.page.query_selector("button[data-testid='copy-button__label_link']")
+                if copy_btn:
+                    try:
+                        await copy_btn.click()
+                        await self._human_delay(350, 700)
+                        clipboard_text = await self.page.evaluate(
+                            """
+                            async () => {
+                                try {
+                                    if (!navigator.clipboard || !navigator.clipboard.readText) return null;
+                                    const text = await navigator.clipboard.readText();
+                                    return text || null;
+                                } catch (e) {
+                                    return null;
+                                }
+                            }
+                            """
+                        )
+                        if clipboard_text and (
+                            "mercadolivre.com/sec/" in clipboard_text or "meli.to/" in clipboard_text
+                        ):
+                            result["url_curta"] = str(clipboard_text).strip()
+                            found_by = "copy_button_clipboard"
+                    except Exception as exc:
+                        self.logger.warning("Falha ao copiar link via botao clipboard | erro=%s", exc)
+
+            if not result.get("url_curta"):
+                label_link = await self.page.query_selector("label:has-text('Link do produto')")
+                if label_link:
+                    container = await label_link.evaluate_handle(
+                        """
+                        (label) => {
+                            const formControl = label.closest('.andes-form-control');
+                            if (!formControl) return null;
+                            return formControl.querySelector('textarea, input');
+                        }
+                        """
+                    )
+                    if container:
+                        try:
+                            field_elem = container.as_element()
+                            if field_elem:
+                                value = await field_elem.input_value()
+                                if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
+                                    result["url_curta"] = value.strip()
+                                    found_by = "label_link_field"
+                        except Exception:
+                            pass
 
             if not result.get("url_curta"):
                 js_value = await self.page.evaluate(
@@ -638,10 +855,11 @@ class MercadoLivrePlaywrightScraper:
                 )
                 if js_value:
                     result["url_curta"] = str(js_value).strip()
+                    found_by = "page_text_regex"
 
             try:
                 close_btn = await self.page.query_selector(
-                    "[class*='close'], button[aria-label='Fechar'], button:has-text('Fechar')"
+                    "button[aria-label='close'], [class*='close'], button[aria-label='Fechar'], button:has-text('Fechar')"
                 )
                 if close_btn:
                     await close_btn.click()
@@ -652,9 +870,15 @@ class MercadoLivrePlaywrightScraper:
 
             await self._human_delay(200, 450)
             if result.get("url_curta"):
-                self.logger.info("Link afiliado extraido com sucesso | url_curta=%s", result.get("url_curta"))
+                self.logger.info(
+                    "Link afiliado extraido com sucesso | source=%s url_curta=%s",
+                    found_by or "unknown",
+                    result.get("url_curta"),
+                )
                 return result
-            self.logger.warning("Nao foi possivel extrair link afiliado apos tentativas")
+            self.logger.warning(
+                "Nao foi possivel extrair link afiliado apos tentativas | motivo=campo_sem_url_valida"
+            )
             return None
         except Exception as exc:
             self.logger.error("Erro durante extracao de link afiliado: %s", exc)

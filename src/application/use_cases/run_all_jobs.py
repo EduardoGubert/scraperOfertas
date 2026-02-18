@@ -22,11 +22,21 @@ async def run_jobs_in_sequence(
     max_items: int,
     timeout_seconds: int,
     job_sequence: Sequence[str] | None = None,
+    min_desconto_percent: int | None = None,
+    min_comissao_percent: int | None = None,
+    category_filter: str | list[str] | None = None,
 ) -> AllJobsResult:
     async def run_single(scraper_type: str) -> ScrapeResultDTO:
         async with engine_factory() as engine:
             return await asyncio.wait_for(
-                job_use_case.execute(scraper_type=scraper_type, max_items=max_items, engine=engine),
+                job_use_case.execute(
+                    scraper_type=scraper_type,
+                    max_items=max_items,
+                    engine=engine,
+                    min_desconto_percent=min_desconto_percent,
+                    min_comissao_percent=min_comissao_percent,
+                    category_filter=category_filter,
+                ),
                 timeout=timeout_seconds,
             )
 

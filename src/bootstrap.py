@@ -34,6 +34,9 @@ class AppContainer:
             offer_repository=self.offer_repository,
             coupon_repository=self.coupon_repository,
             cache=self.cache,
+            default_min_desconto_percent=self.settings.offers_min_desconto_percent,
+            default_min_comissao_percent=self.settings.offers_min_comissao_percent,
+            default_category_filter=self.settings.offers_categoria_filter,
         )
         return self
 
@@ -48,6 +51,7 @@ class AppContainer:
             wait_ms=self.settings.scraper_wait_ms,
             max_produtos=max_produtos,
             user_data_dir=self.settings.browser_data_dir,
+            ganhos_xpath=self.settings.offers_ganhos_xpath,
         )
 
 

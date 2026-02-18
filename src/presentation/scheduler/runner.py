@@ -17,12 +17,18 @@ class ScraperScheduler:
         intervalo_minutos: int,
         max_produtos: int,
         job_timeout_seconds: int,
+        min_desconto_percent: int,
+        min_comissao_percent: int,
+        category_filter: str | None = None,
         executar_cupons: bool = True,
         headless: bool = True,
     ):
         self.intervalo_minutos = intervalo_minutos
         self.max_produtos = max_produtos
         self.job_timeout_seconds = job_timeout_seconds
+        self.min_desconto_percent = min_desconto_percent
+        self.min_comissao_percent = min_comissao_percent
+        self.category_filter = category_filter
         self.executar_cupons = executar_cupons
         self.headless = headless
         self.rodando = False
@@ -33,14 +39,24 @@ class ScraperScheduler:
         async with build_container() as container:
             async with container.engine_factory(headless=self.headless, max_produtos=self.max_produtos) as engine:
                 result = await asyncio.wait_for(
-                    container.job_use_case.execute(scraper_type=scraper_type, max_items=self.max_produtos, engine=engine),
+                    container.job_use_case.execute(
+                        scraper_type=scraper_type,
+                        max_items=self.max_produtos,
+                        engine=engine,
+                        min_desconto_percent=self.min_desconto_percent,
+                        min_comissao_percent=self.min_comissao_percent,
+                        category_filter=self.category_filter,
+                    ),
                     timeout=self.job_timeout_seconds,
                 )
                 return result.__dict__
 
     async def executar_todos_sequencial(self) -> dict:
         self.logger.info(
-            f"Iniciando execucao sequencial | max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds}"
+            "Iniciando execucao sequencial | "
+            f"max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds} "
+            f"min_desconto={self.min_desconto_percent} min_comissao={self.min_comissao_percent} "
+            f"categoria={self.category_filter or 'todas'}"
         )
         started_at = datetime.now()
         job_sequence = ("ofertas", "ofertas_relampago", "cupons") if self.executar_cupons else ("ofertas", "ofertas_relampago")
@@ -52,6 +68,9 @@ class ScraperScheduler:
                 max_items=self.max_produtos,
                 timeout_seconds=self.job_timeout_seconds,
                 job_sequence=job_sequence,
+                min_desconto_percent=self.min_desconto_percent,
+                min_comissao_percent=self.min_comissao_percent,
+                category_filter=self.category_filter,
             )
         finished_at = datetime.now()
         payload = {
@@ -74,7 +93,9 @@ class ScraperScheduler:
         self.logger.info("Scheduler iniciado")
         self.logger.info(
             f"Configuracao | intervalo_minutos={self.intervalo_minutos} "
-            f"max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds} executar_cupons={self.executar_cupons}"
+            f"max_produtos={self.max_produtos} timeout_s={self.job_timeout_seconds} "
+            f"min_desconto={self.min_desconto_percent} min_comissao={self.min_comissao_percent} "
+            f"categoria={self.category_filter or 'todas'} executar_cupons={self.executar_cupons}"
         )
         self.rodando = True
 
@@ -118,6 +139,24 @@ def main() -> None:
         help="Timeout por job em segundos",
     )
     parser.add_argument(
+        "--min-desconto",
+        type=int,
+        default=settings.offers_min_desconto_percent,
+        help="Percentual minimo de desconto para persistir ofertas/relampago",
+    )
+    parser.add_argument(
+        "--min-comissao",
+        type=int,
+        default=settings.offers_min_comissao_percent,
+        help="Percentual minimo de comissao para persistir ofertas/relampago",
+    )
+    parser.add_argument(
+        "--categoria",
+        type=str,
+        default=settings.offers_categoria_filter,
+        help="Filtro de categoria para ofertas/relampago (ex.: eletronicos, vestuario)",
+    )
+    parser.add_argument(
         "--sem-cupons",
         action="store_true",
         help="Executa apenas ofertas e ofertas_relampago",
@@ -129,6 +168,9 @@ def main() -> None:
         intervalo_minutos=args.intervalo,
         max_produtos=args.produtos,
         job_timeout_seconds=args.job_timeout_seconds,
+        min_desconto_percent=max(0, args.min_desconto),
+        min_comissao_percent=max(0, args.min_comissao),
+        category_filter=(args.categoria or "").strip() or None,
         executar_cupons=not args.sem_cupons,
         headless=True,
     )

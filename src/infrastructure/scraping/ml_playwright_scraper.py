@@ -30,6 +30,7 @@ from src.infrastructure.scraping.selectors.offers import (
     SHARE_BUTTON_XPATH,
     SHARE_MODAL_INPUT_XPATH,
 )
+from src.infrastructure.scraping.parsers import parse_decimal_from_text
 
 
 class MercadoLivrePlaywrightScraper:
@@ -448,16 +449,10 @@ class MercadoLivrePlaywrightScraper:
         return collected[:max_produtos]
 
     def _parse_preco(self, valor: str | None) -> float | None:
-        if not valor:
+        parsed = parse_decimal_from_text(valor)
+        if parsed is None:
             return None
-        cleaned = valor.replace(".", "").replace(",", ".").strip()
-        cleaned = re.sub(r"[^\d.]", "", cleaned)
-        if not cleaned:
-            return None
-        try:
-            return float(cleaned)
-        except ValueError:
-            return None
+        return float(parsed)
 
     def _parse_desconto(self, valor: str | None) -> int | None:
         if not valor:
@@ -499,30 +494,88 @@ class MercadoLivrePlaywrightScraper:
     async def _extract_comissao_percentual(self) -> int | None:
         assert self.page
         self.logger.info("Extraindo comissao do produto | xpath=%s", self.ganhos_xpath)
-        raw_text = await self._evaluate_with_retry(
-            f"""
-            () => {{
-                const xpath = {json.dumps(self.ganhos_xpath)};
-                const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                if (!node) return null;
-                const value = (node.textContent || node.innerText || "").trim();
-                return value || null;
-            }}
-            """,
-            retries=3,
-            reason="extract_comissao_percentual",
+        timeout_seconds = 10.0
+        poll_interval_seconds = 0.3
+        started_at = time.perf_counter()
+        source_attempts: list[str] = []
+
+        while (time.perf_counter() - started_at) < timeout_seconds:
+            raw_xpath = await self._evaluate_with_retry(
+                f"""
+                () => {{
+                    const xpath = {json.dumps(self.ganhos_xpath)};
+                    const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                    if (!node) return null;
+                    const value = (node.textContent || node.innerText || "").replace(/\\s+/g, " ").trim();
+                    return value || null;
+                }}
+                """,
+                retries=3,
+                reason="extract_comissao_percentual_xpath",
+            )
+            source_attempts.append("xpath")
+            percentual_xpath = self._parse_percentual(str(raw_xpath or ""))
+            if percentual_xpath is not None:
+                wait_ms = int((time.perf_counter() - started_at) * 1000)
+                self.logger.info(
+                    "Comissao extraida com sucesso | texto=%s percentual=%s source=%s wait_ms=%s",
+                    raw_xpath,
+                    percentual_xpath,
+                    "xpath",
+                    wait_ms,
+                )
+                return percentual_xpath
+
+            raw_nav_header = await self._evaluate_with_retry(
+                """
+                () => {
+                    const roots = Array.from(document.querySelectorAll("nav, header"));
+                    for (const root of roots) {
+                        const style = window.getComputedStyle(root);
+                        if (
+                            style.display === "none" ||
+                            style.visibility === "hidden" ||
+                            Number(style.opacity || "1") === 0
+                        ) {
+                            continue;
+                        }
+                        const text = (root.innerText || root.textContent || "").replace(/\\s+/g, " ").trim();
+                        if (!text) continue;
+                        if (!/ganhos/i.test(text) || !/%/.test(text)) continue;
+                        const match = text.match(/ganhos\\s*\\d{1,3}\\s*%|\\d{1,3}\\s*%/i);
+                        if (match) return match[0];
+                        return text;
+                    }
+                    return null;
+                }
+                """,
+                retries=3,
+                reason="extract_comissao_percentual_nav_header",
+            )
+            source_attempts.append("nav_header_text")
+            percentual_nav_header = self._parse_percentual(str(raw_nav_header or ""))
+            if percentual_nav_header is not None:
+                wait_ms = int((time.perf_counter() - started_at) * 1000)
+                self.logger.info(
+                    "Comissao extraida com sucesso | texto=%s percentual=%s source=%s wait_ms=%s",
+                    raw_nav_header,
+                    percentual_nav_header,
+                    "nav_header_text",
+                    wait_ms,
+                )
+                return percentual_nav_header
+
+            await asyncio.sleep(poll_interval_seconds)
+
+        wait_ms = int((time.perf_counter() - started_at) * 1000)
+        source_attempts_label = ",".join(sorted(set(source_attempts))) if source_attempts else "nenhuma"
+        self.logger.warning(
+            "Comissao nao encontrada no produto | motivo=comissao_indisponivel_timeout wait_ms=%s xpath=%s source_attempts=%s",
+            wait_ms,
+            self.ganhos_xpath,
+            source_attempts_label,
         )
-        if not raw_text:
-            self.logger.warning("Comissao nao encontrada no produto | xpath=%s", self.ganhos_xpath)
-            return None
-
-        percentual = self._parse_percentual(str(raw_text))
-        if percentual is None:
-            self.logger.warning("Texto de comissao sem percentual valido | texto=%s", raw_text)
-            return None
-
-        self.logger.info("Comissao extraida com sucesso | texto=%s percentual=%s", raw_text, percentual)
-        return percentual
+        return None
 
     async def _extract_categoria_produto(self) -> str | None:
         assert self.page
@@ -684,6 +737,27 @@ class MercadoLivrePlaywrightScraper:
         assert self.page
         self.logger.info("Iniciando extracao de link afiliado")
         try:
+            def _is_short_link(value: str | None) -> bool:
+                text = (value or "").strip()
+                return "mercadolivre.com/sec/" in text or "meli.to/" in text
+
+            async def _read_link_from_container(container) -> tuple[Optional[str], Optional[str]]:
+                selectors = [
+                    "textarea[data-testid='text-field__label_link']",
+                    "textarea#P0-1",
+                    "textarea, input[type='text'], input[readonly], textarea[readonly]",
+                ]
+                for selector in selectors:
+                    field = await container.query_selector(selector)
+                    if not field:
+                        continue
+                    value = await field.input_value()
+                    if not value:
+                        value = await field.get_attribute("value")
+                    if _is_short_link(value):
+                        return (value.strip(), selector)
+                return (None, None)
+
             btn = None
             try:
                 btn = await self.page.wait_for_selector(f"xpath={SHARE_BUTTON_XPATH}", timeout=5000)
@@ -704,6 +778,7 @@ class MercadoLivrePlaywrightScraper:
             self.logger.info("Botao Compartilhar clicado")
             await self._human_delay(350, 700)
 
+            modal = None
             modal_selector = None
             modal_selectors = [
                 "div[data-testid='popper'].link-generator",
@@ -713,7 +788,7 @@ class MercadoLivrePlaywrightScraper:
             wait_start = time.perf_counter()
             for selector in modal_selectors:
                 try:
-                    await self.page.wait_for_selector(selector, timeout=10000)
+                    modal = await self.page.wait_for_selector(selector, state="visible", timeout=10000)
                     modal_selector = selector
                     elapsed_ms = int((time.perf_counter() - wait_start) * 1000)
                     self.logger.info(
@@ -737,107 +812,78 @@ class MercadoLivrePlaywrightScraper:
             found_by = None
 
             try:
-                modal = await self.page.query_selector(f"xpath={SHARE_MODAL_INPUT_XPATH}")
-                if modal:
-                    input_link = await modal.query_selector("textarea[data-testid='text-field__label_link']")
-                    if not input_link:
-                        input_link = await modal.query_selector("textarea#P0-1")
-                    if not input_link:
-                        input_link = await modal.query_selector(
-                            "textarea, input[type='text'], input[readonly], textarea[readonly]"
-                        )
-                    if input_link:
-                        value = await input_link.input_value()
-                        if not value:
-                            value = await input_link.get_attribute("value")
-                        if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
-                            result["url_curta"] = value.strip()
-                            found_by = "legacy_xpath_modal"
+                legacy_modal = await self.page.query_selector(f"xpath={SHARE_MODAL_INPUT_XPATH}")
+                if legacy_modal:
+                    modal = legacy_modal
             except Exception:
                 pass
 
-            if not result.get("url_curta"):
-                primary = await self.page.query_selector("textarea[data-testid='text-field__label_link']")
-                if primary:
-                    value = await primary.input_value()
-                    if not value:
-                        value = await primary.get_attribute("value")
-                    if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
-                        result["url_curta"] = value.strip()
-                        found_by = "textarea[data-testid='text-field__label_link']"
+            # Aguarda ate 10s o campo "Link do produto" ser preenchido de fato.
+            read_start = time.perf_counter()
+            while (time.perf_counter() - read_start) < 10:
+                try:
+                    value, source = await _read_link_from_container(modal)
+                except Exception as exc:
+                    self.logger.warning("Falha temporaria ao ler campo do link; retry | erro=%s", exc)
+                    try:
+                        refreshed_modal = await self.page.query_selector(modal_selector or "")
+                        if refreshed_modal:
+                            modal = refreshed_modal
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.35)
+                    continue
+                if value:
+                    result["url_curta"] = value
+                    found_by = f"modal_field:{source}"
+                    break
+                await asyncio.sleep(0.35)
 
             if not result.get("url_curta"):
-                secondary = await self.page.query_selector("textarea#P0-1")
-                if secondary:
-                    value = await secondary.input_value()
-                    if not value:
-                        value = await secondary.get_attribute("value")
-                    if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
-                        result["url_curta"] = value.strip()
-                        found_by = "textarea#P0-1"
+                self.logger.info("Campo de link ainda vazio; tentando botao de copiar")
+                copy_btn = await modal.query_selector("button[data-testid='copy-button__label_link']")
+                if copy_btn:
+                    try:
+                        await copy_btn.click()
+                        await self._human_delay(450, 900)
+                        # Tenta novamente ler o campo apos o clique de copiar.
+                        value, source = await _read_link_from_container(modal)
+                        if value:
+                            result["url_curta"] = value
+                            found_by = f"copy_then_field:{source}"
+                        else:
+                            clipboard_text = await self.page.evaluate(
+                                """
+                                async () => {
+                                    try {
+                                        if (!navigator.clipboard || !navigator.clipboard.readText) return null;
+                                        const text = await navigator.clipboard.readText();
+                                        return text || null;
+                                    } catch (e) {
+                                        return null;
+                                    }
+                                }
+                                """
+                            )
+                            if _is_short_link(str(clipboard_text or "")):
+                                result["url_curta"] = str(clipboard_text).strip()
+                                found_by = "copy_button_clipboard"
+                    except Exception as exc:
+                        self.logger.warning("Falha ao copiar link via botao clipboard | erro=%s", exc)
 
             if not result.get("url_curta"):
+                # Fallback global para casos em que o modal muda de estrutura.
                 inputs = await self.page.query_selector_all(
-                    "textarea, input[type='text'], input[readonly], textarea[readonly]"
+                    "textarea[data-testid='text-field__label_link'], textarea, input[type='text'], input[readonly]"
                 )
                 for input_elem in inputs:
                     value = await input_elem.input_value()
                     if not value:
                         value = await input_elem.get_attribute("value") or ""
-                    if "mercadolivre.com/sec/" in value or "meli.to/" in value:
+                    if _is_short_link(value):
                         result["url_curta"] = value.strip()
-                        found_by = "generic_fields_scan"
+                        found_by = "global_fields_scan"
                         break
-
-            if not result.get("url_curta"):
-                copy_btn = await self.page.query_selector("button[data-testid='copy-button__label_link']")
-                if copy_btn:
-                    try:
-                        await copy_btn.click()
-                        await self._human_delay(350, 700)
-                        clipboard_text = await self.page.evaluate(
-                            """
-                            async () => {
-                                try {
-                                    if (!navigator.clipboard || !navigator.clipboard.readText) return null;
-                                    const text = await navigator.clipboard.readText();
-                                    return text || null;
-                                } catch (e) {
-                                    return null;
-                                }
-                            }
-                            """
-                        )
-                        if clipboard_text and (
-                            "mercadolivre.com/sec/" in clipboard_text or "meli.to/" in clipboard_text
-                        ):
-                            result["url_curta"] = str(clipboard_text).strip()
-                            found_by = "copy_button_clipboard"
-                    except Exception as exc:
-                        self.logger.warning("Falha ao copiar link via botao clipboard | erro=%s", exc)
-
-            if not result.get("url_curta"):
-                label_link = await self.page.query_selector("label:has-text('Link do produto')")
-                if label_link:
-                    container = await label_link.evaluate_handle(
-                        """
-                        (label) => {
-                            const formControl = label.closest('.andes-form-control');
-                            if (!formControl) return null;
-                            return formControl.querySelector('textarea, input');
-                        }
-                        """
-                    )
-                    if container:
-                        try:
-                            field_elem = container.as_element()
-                            if field_elem:
-                                value = await field_elem.input_value()
-                                if value and ("mercadolivre.com/sec/" in value or "meli.to/" in value):
-                                    result["url_curta"] = value.strip()
-                                    found_by = "label_link_field"
-                        except Exception:
-                            pass
 
             if not result.get("url_curta"):
                 js_value = await self.page.evaluate(
@@ -853,13 +899,13 @@ class MercadoLivrePlaywrightScraper:
                     }
                     """
                 )
-                if js_value:
+                if _is_short_link(str(js_value or "")):
                     result["url_curta"] = str(js_value).strip()
                     found_by = "page_text_regex"
 
             try:
                 close_btn = await self.page.query_selector(
-                    "button[aria-label='close'], [class*='close'], button[aria-label='Fechar'], button:has-text('Fechar')"
+                    "button.andes-tooltip-button-close, button[aria-label='close'], button[aria-label='Fechar'], button:has-text('Fechar')"
                 )
                 if close_btn:
                     await close_btn.click()
@@ -871,13 +917,15 @@ class MercadoLivrePlaywrightScraper:
             await self._human_delay(200, 450)
             if result.get("url_curta"):
                 self.logger.info(
-                    "Link afiliado extraido com sucesso | source=%s url_curta=%s",
+                    "Link afiliado extraido com sucesso | modal_selector=%s source=%s url_curta=%s",
+                    modal_selector,
                     found_by or "unknown",
                     result.get("url_curta"),
                 )
                 return result
             self.logger.warning(
-                "Nao foi possivel extrair link afiliado apos tentativas | motivo=campo_sem_url_valida"
+                "Nao foi possivel extrair link afiliado apos tentativas | modal_selector=%s motivo=campo_sem_url_valida",
+                modal_selector,
             )
             return None
         except Exception as exc:

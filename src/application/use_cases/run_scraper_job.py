@@ -186,12 +186,16 @@ class RunScraperJobUseCase:
                     continue
 
                 desconto_efetivo = offer.desconto or 0
-                comissao_efetiva = offer.comissao_percentual or 0
+                comissao_extraida = offer.comissao_percentual
+                comissao_efetiva = comissao_extraida if comissao_extraida is not None else 0
+                comissao_auditoria: int | str = comissao_extraida if comissao_extraida is not None else "indisponivel"
                 categoria_produto = offer.categoria
                 motivos_filtro: list[str] = []
                 if desconto_efetivo < min_desconto_percent:
                     motivos_filtro.append(f"desconto={desconto_efetivo}/{min_desconto_percent}")
-                if comissao_efetiva < min_comissao_percent:
+                if comissao_extraida is None:
+                    motivos_filtro.append(f"comissao=indisponivel/{min_comissao_percent}")
+                elif comissao_efetiva < min_comissao_percent:
                     motivos_filtro.append(f"comissao={comissao_efetiva}/{min_comissao_percent}")
                 if category_filter and not category_matches(category_filter, categoria_produto):
                     motivos_filtro.append(
@@ -208,7 +212,7 @@ class RunScraperJobUseCase:
                             "dedupe": offer.chave_dedupe,
                             "categoria": categoria_produto or "sem_categoria",
                             "desconto": desconto_efetivo,
-                            "comissao": comissao_efetiva,
+                            "comissao": comissao_auditoria,
                             "motivos": " ; ".join(motivos_filtro),
                             "link": link_afiliado,
                         }
@@ -227,7 +231,7 @@ class RunScraperJobUseCase:
                         "dedupe": offer.chave_dedupe,
                         "categoria": categoria_produto or "sem_categoria",
                         "desconto": desconto_efetivo,
-                        "comissao": comissao_efetiva,
+                        "comissao": comissao_auditoria,
                         "status": offer.status,
                         "link": link_afiliado,
                     }
@@ -236,7 +240,7 @@ class RunScraperJobUseCase:
                     "Produto aprovado em filtro | "
                     f"job_id={job_id} scraper_type={scraper_type} index={idx} "
                     f"dedupe={offer.chave_dedupe} passou_filtro=True "
-                    f"desconto={desconto_efetivo} comissao={comissao_efetiva} "
+                    f"desconto={desconto_efetivo} comissao={comissao_auditoria} "
                     f"categoria={categoria_produto or 'sem_categoria'}"
                 )
                 exists_in_db = await self.offer_repository.exists_offer(table_name, offer.chave_dedupe, offer.mlb_id)

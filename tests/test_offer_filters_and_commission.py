@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.application.use_cases.run_scraper_job import RunScraperJobUseCase
 from src.domain.entities.offers import OfferEntity
@@ -54,6 +54,62 @@ def test_parse_comissao_percentual_from_text():
     scraper = MercadoLivrePlaywrightScraper()
     assert scraper._parse_percentual("GANHOS 16%") == 16
     assert scraper._parse_percentual("sem percentual") is None
+
+
+def test_parse_preco_handles_mixed_locales():
+    scraper = MercadoLivrePlaywrightScraper()
+    assert scraper._parse_preco("798.90") == 798.9
+    assert scraper._parse_preco("1307.00") == 1307.0
+    assert scraper._parse_preco("R$ 1.307,00") == 1307.0
+    assert scraper._parse_preco("R$ 145,30") == 145.3
+    assert scraper._parse_preco("sem preco") is None
+    assert scraper._parse_preco("") is None
+    assert scraper._parse_preco(None) is None
+
+
+def test_extract_comissao_percentual_uses_nav_header_fallback():
+    scraper = MercadoLivrePlaywrightScraper()
+    scraper.page = object()
+
+    async def _fake_evaluate_with_retry(script, *, arg=None, retries=3, reason="evaluate"):  # noqa: ANN001, ARG001
+        if reason == "extract_comissao_percentual_xpath":
+            return None
+        if reason == "extract_comissao_percentual_nav_header":
+            return "GANHOS 5%"
+        return None
+
+    scraper._evaluate_with_retry = _fake_evaluate_with_retry  # type: ignore[method-assign]
+
+    with patch("src.infrastructure.scraping.ml_playwright_scraper.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(scraper._extract_comissao_percentual())
+
+    assert result == 5
+
+
+def test_extract_comissao_percentual_returns_none_when_unavailable():
+    scraper = MercadoLivrePlaywrightScraper()
+    scraper.page = object()
+
+    async def _fake_evaluate_with_retry(script, *, arg=None, retries=3, reason="evaluate"):  # noqa: ANN001, ARG001
+        return None
+
+    scraper._evaluate_with_retry = _fake_evaluate_with_retry  # type: ignore[method-assign]
+    clock = {"value": 0.0}
+
+    def _fake_perf_counter():
+        clock["value"] += 1.0
+        return clock["value"]
+
+    with (
+        patch("src.infrastructure.scraping.ml_playwright_scraper.time.perf_counter", side_effect=_fake_perf_counter),
+        patch("src.infrastructure.scraping.ml_playwright_scraper.asyncio.sleep", new=AsyncMock()),
+        patch.object(scraper.logger, "warning") as warning_mock,
+    ):
+        result = asyncio.run(scraper._extract_comissao_percentual())
+
+    assert result is None
+    warning_messages = " ".join(str(call.args[0]) for call in warning_mock.call_args_list if call.args)
+    assert "comissao_indisponivel_timeout" in warning_messages
 
 
 def test_offer_filter_discards_items_below_thresholds():
@@ -117,6 +173,99 @@ def test_offer_filter_discards_items_below_thresholds():
     assert offer_repository.exists_offer.await_count == 1
     assert offer_repository.upsert_offer.await_count == 1
     assert cache.set.await_count == 1
+
+
+def test_offer_filter_logs_indisponivel_for_missing_comissao():
+    logger = logging.getLogger("test.offer.filter.indisponivel")
+    offer_repository = AsyncMock()
+    offer_repository.ensure_offer_schema_compatibility = AsyncMock(return_value=set())
+    offer_repository.exists_offer = AsyncMock(return_value=False)
+    offer_repository.upsert_offer = AsyncMock(return_value=(1, True))
+    coupon_repository = AsyncMock()
+    cache = AsyncMock()
+    cache.set = AsyncMock()
+
+    use_case = RunScraperJobUseCase(
+        logger=logger,
+        offer_repository=offer_repository,
+        coupon_repository=coupon_repository,
+        cache=cache,
+        default_min_desconto_percent=30,
+        default_min_comissao_percent=10,
+    )
+
+    payload_by_url = {
+        "https://produto.mercadolivre.com.br/MLB-111111111-item": {
+            "url_original": "https://produto.mercadolivre.com.br/MLB-111111111-item",
+            "desconto": 40,
+            "comissao_percentual": None,
+            "categoria": "Eletrônicos, Áudio e Vídeo",
+            "status": "sucesso",
+        },
+    }
+    engine = _FakeOffersEngine(payload_by_url=payload_by_url)
+
+    with patch.object(logger, "info") as info_mock:
+        result = asyncio.run(
+            use_case.execute(
+                scraper_type="ofertas",
+                max_items=1,
+                engine=engine,
+                min_desconto_percent=30,
+                min_comissao_percent=10,
+            )
+        )
+
+    assert result.filtrados == 1
+    joined_logs = " ".join(str(call.args[0]) for call in info_mock.call_args_list if call.args)
+    assert "comissao=indisponivel/10" in joined_logs
+    assert "comissao=0/10" not in joined_logs
+
+
+def test_offer_filter_keeps_zero_when_comissao_is_real_zero():
+    logger = logging.getLogger("test.offer.filter.real_zero")
+    offer_repository = AsyncMock()
+    offer_repository.ensure_offer_schema_compatibility = AsyncMock(return_value=set())
+    offer_repository.exists_offer = AsyncMock(return_value=False)
+    offer_repository.upsert_offer = AsyncMock(return_value=(1, True))
+    coupon_repository = AsyncMock()
+    cache = AsyncMock()
+    cache.set = AsyncMock()
+
+    use_case = RunScraperJobUseCase(
+        logger=logger,
+        offer_repository=offer_repository,
+        coupon_repository=coupon_repository,
+        cache=cache,
+        default_min_desconto_percent=30,
+        default_min_comissao_percent=10,
+    )
+
+    payload_by_url = {
+        "https://produto.mercadolivre.com.br/MLB-222222222-item": {
+            "url_original": "https://produto.mercadolivre.com.br/MLB-222222222-item",
+            "desconto": 40,
+            "comissao_percentual": 0,
+            "categoria": "Eletrônicos, Áudio e Vídeo",
+            "status": "sucesso",
+        },
+    }
+    engine = _FakeOffersEngine(payload_by_url=payload_by_url)
+
+    with patch.object(logger, "info") as info_mock:
+        result = asyncio.run(
+            use_case.execute(
+                scraper_type="ofertas",
+                max_items=1,
+                engine=engine,
+                min_desconto_percent=30,
+                min_comissao_percent=10,
+            )
+        )
+
+    assert result.filtrados == 1
+    joined_logs = " ".join(str(call.args[0]) for call in info_mock.call_args_list if call.args)
+    assert "comissao=0/10" in joined_logs
 
 
 def test_offer_filter_by_category_alias():
